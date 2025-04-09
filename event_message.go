@@ -9,7 +9,7 @@ type EventMessage[T any] struct {
 	ID        string
 	Body      T
 	Timestamp int64
-	Attempts  uint16
+	Attempts  uint32
 
 	Delegate EventMessageDelegate[T]
 
@@ -26,7 +26,7 @@ type EventMessageDelegate[T any] interface {
 
 	// OnRequeue is called when the Requeue() method
 	// is triggered on the Message
-	OnRequeue(m *EventMessage[T], delay time.Duration, backoff bool)
+	OnRequeue(m *EventMessage[T], delay time.Duration)
 
 	// OnTouch is called when the Touch() method
 	// is triggered on the Message
@@ -36,22 +36,6 @@ type EventMessageDelegate[T any] interface {
 type EventHandler[T any] interface {
 	HandleMessage(message *EventMessage[T]) error
 }
-
-type EventMDelegate[T any] struct{}
-
-// OnFinish implements MessageDelegate.
-func (m *EventMDelegate[T]) OnFinish(*EventMessage[T]) {
-}
-
-// OnRequeue implements MessageDelegate.
-func (*EventMDelegate[T]) OnRequeue(m *EventMessage[T], delay time.Duration, backoff bool) {
-}
-
-// OnTouch implements MessageDelegate.
-func (m *EventMDelegate[T]) OnTouch(*EventMessage[T]) {
-}
-
-var _ EventMessageDelegate[any] = &EventMDelegate[any]{}
 
 // Finish 消息处理完成
 func (m *EventMessage[T]) Finish() {
@@ -71,10 +55,23 @@ func (m *EventMessage[T]) IsAutoResponseDisabled() bool {
 	return atomic.LoadInt32(&m.autoResponseDisabled) == 1
 }
 
+// DisableAutoResponse 禁用自动完成
+func (m *EventMessage[T]) DisableAutoResponse() {
+	atomic.StoreInt32(&m.autoResponseDisabled, 1)
+}
+
 // Requeue 重新入队
 func (m *EventMessage[T]) Requeue(delay time.Duration) {
-	if !atomic.CompareAndSwapInt32(&m.responded, 0, 1) {
+	if atomic.LoadInt32(&m.responded) == 1 {
 		return
 	}
-	m.Delegate.OnRequeue(m, delay, true)
+	m.Delegate.OnRequeue(m, delay)
+}
+
+// Touch 防止消息处理超时
+func (m *EventMessage[T]) Touch() {
+	if m.HasResponded() {
+		return
+	}
+	m.Delegate.OnTouch(m)
 }

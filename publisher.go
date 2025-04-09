@@ -1,28 +1,24 @@
 package nsqite
 
-type Publisher[T any] struct {
-	queue chan *EventMessage[T]
-}
+import (
+	"time"
+
+	"github.com/google/uuid"
+)
+
+type Publisher[T any] struct{}
 
 func NewPublisher[T any]() *Publisher[T] {
-	return &Publisher[T]{
-		queue: make(chan *EventMessage[T]),
-	}
+	return &Publisher[T]{}
 }
 
-func (p *Publisher[T]) publish(topic string, msg *EventMessage[T]) error {
-	eventBus.Publish(topic, msg)
-	return nil
-}
-
-func (p *Publisher[T]) Publish(topic string, msg T) error {
-	p.publish(topic, &EventMessage[T]{
-		Body:     msg,
-		Delegate: &EventMDelegate[T]{},
+func (p *Publisher[T]) Publish(topic string, msg T) {
+	eventBus.Publish(topic, &EventMessage[T]{
+		ID:        uuid.New().String(),
+		Body:      msg,
+		Timestamp: time.Now().UnixMilli(),
 	})
-	return nil
 }
 
 func (p *Publisher[T]) Stop() {
-	close(p.queue)
 }
