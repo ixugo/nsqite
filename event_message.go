@@ -30,6 +30,7 @@ type EventMessageDelegate[T any] interface {
 
 	// OnTouch is called when the Touch() method
 	// is triggered on the Message
+	// 超时应该由消息订阅者来处理
 	OnTouch(*EventMessage[T])
 }
 

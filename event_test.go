@@ -137,7 +137,7 @@ func TestDisableAutoResponse(t *testing.T) {
 	// 测试需要重试的消息
 	publisher.Publish(topic, "test message")
 
-	subscriber.Wait()
+	subscriber.WaitMessage()
 
 	// 验证重试次数
 	if atomic.LoadInt32(&reader3.attemptCount) != 4 {
@@ -173,7 +173,7 @@ func TestMaxAttemptsLimit(t *testing.T) {
 	publisher.Publish(topic, "test-max-attempts")
 
 	// 等待足够的时间让重试发生
-	subscriber.Wait()
+	subscriber.WaitMessage()
 
 	// 验证尝试次数不超过最大尝试次数
 	attempts := atomic.LoadInt32(&tracker.attempts)
@@ -222,7 +222,7 @@ func TestConcurrentPublishSubscribe(t *testing.T) {
 	}
 
 	for _, consumer := range consumers {
-		consumer.Wait()
+		consumer.WaitMessage()
 	}
 
 	// 验证每个消费者是否都收到了所有消息

@@ -15,11 +15,14 @@ var (
 	_ EventMessageDelegate[string] = (*Subscriber[string])(nil)
 )
 
+// Subscriber 消息订阅者
 type Subscriber[T any] struct {
 	topic, channel   string
 	incomingMessages chan *EventMessage[T]
-	stopHandler      sync.Once
-	runningHandlers  int32
+	backendMessage   chan *EventMessage[T]
+
+	stopHandler     sync.Once
+	runningHandlers int32
 
 	MaxAttempts uint32
 
@@ -28,19 +31,23 @@ type Subscriber[T any] struct {
 	queueSize uint16
 
 	pendingMessages int32
+	exit            chan struct{}
 
 	deferredPQ    pqueue.PriorityQueue
 	deferredMutex sync.Mutex
 }
 
+// SubscriberOption 消息订阅者选项
 type SubscriberOption[T any] func(*Subscriber[T])
 
+// WithQueueSize 设置消息队列大小
 func WithQueueSize[T any](size uint16) SubscriberOption[T] {
 	return func(s *Subscriber[T]) {
 		s.queueSize = size
 	}
 }
 
+// WithMaxAttempts 设置消息最大重试次数
 func WithMaxAttempts[T any](maxAttempts uint32) SubscriberOption[T] {
 	return func(s *Subscriber[T]) {
 		s.MaxAttempts = maxAttempts
@@ -67,30 +74,63 @@ func (s *Subscriber[T]) SendMessage(msg interface{}) {
 	}
 }
 
+// NewSubscriber 创建消息订阅者
 func NewSubscriber[T any](topic, channel string, opts ...SubscriberOption[T]) *Subscriber[T] {
 	c := Subscriber[T]{
 		topic:       topic,
 		channel:     channel,
 		log:         slog.Default().With("topic", topic, "channel", channel),
-		queueSize:   256,
+		queueSize:   128,
 		deferredPQ:  pqueue.New(8),
-		MaxAttempts: 0,
+		MaxAttempts: 10,
+		exit:        make(chan struct{}),
 	}
 	for _, opt := range opts {
 		opt(&c)
 	}
 	c.incomingMessages = make(chan *EventMessage[T], c.queueSize)
+	c.backendMessage = make(chan *EventMessage[T], c.queueSize/4+1)
 	eventBus.AddConsumer(&c)
 	return &c
 }
 
+// AddConcurrentHandlers 添加并发处理程序
 func (s *Subscriber[T]) AddConcurrentHandlers(handler EventHandler[T], concurrency int32) {
+	if !atomic.CompareAndSwapInt32(&s.runningHandlers, 0, concurrency) {
+		panic("concurrent handlers already set")
+	}
 	atomic.AddInt32(&s.runningHandlers, concurrency)
+	go s.backendLoop()
 	for range concurrency {
 		go s.handlerLoop(handler)
 	}
 }
 
+func (s *Subscriber[T]) backendLoop() {
+	timer := time.NewTimer(100 * time.Millisecond)
+	defer timer.Stop()
+	for {
+		select {
+		case <-timer.C:
+		case <-s.exit:
+			return
+		}
+		for {
+			s.deferredMutex.Lock()
+			item, _ := s.deferredPQ.PeekAndShift(time.Now().UnixMilli())
+			s.deferredMutex.Unlock()
+			if item == nil {
+				timer.Reset(time.Second)
+				break
+			}
+			msg := item.Value.(*EventMessage[T])
+			s.backendMessage <- msg
+			timer.Reset(time.Second)
+		}
+	}
+}
+
+// handlerLoop 处理消息的循环
 func (s *Subscriber[T]) handlerLoop(handler EventHandler[T]) {
 	defer func() {
 		if count := atomic.AddInt32(&s.runningHandlers, -1); count == 0 {
@@ -98,25 +138,15 @@ func (s *Subscriber[T]) handlerLoop(handler EventHandler[T]) {
 		}
 	}()
 
-	const interval = 200 * time.Millisecond
-	timer := time.NewTimer(interval)
-	defer timer.Stop()
-
 	var msg *EventMessage[T]
 	var ok bool
 	for {
 		select {
 		case msg, ok = <-s.incomingMessages:
-			if !ok {
-				return
-			}
-		case <-timer.C:
-			timer.Reset(interval)
-			item, _ := s.deferredPQ.PeekAndShift(time.Now().UnixMilli())
-			if item == nil {
-				continue
-			}
-			msg = item.Value.(*EventMessage[T])
+		case msg, ok = <-s.backendMessage:
+		}
+		if !ok {
+			return
 		}
 
 		atomic.AddUint32(&msg.Attempts, 1)
@@ -130,7 +160,9 @@ func (s *Subscriber[T]) handlerLoop(handler EventHandler[T]) {
 		atomic.AddInt32(&s.pendingMessages, -1)
 		if err != nil {
 			if !msg.IsAutoResponseDisabled() {
-				msg.Requeue(-1)
+				// 允许脏读，因为其长度准确性不重要
+				l := s.deferredPQ.Len()
+				msg.Requeue(time.Second + time.Duration(l)*10*time.Millisecond)
 			}
 			continue
 		}
@@ -148,9 +180,11 @@ func (s *Subscriber[T]) shouldFailMessage(msg *EventMessage[T]) bool {
 	return false
 }
 
+// Stop 订阅者停止接收消息
 func (s *Subscriber[T]) Stop() {
 	eventBus.DelConsumer(s)
 	s.stopHandler.Do(func() {
+		close(s.exit)
 		close(s.incomingMessages)
 	})
 }
@@ -164,7 +198,7 @@ func (s *Subscriber[T]) OnFinish(msg *EventMessage[T]) {
 func (s *Subscriber[T]) OnRequeue(m *EventMessage[T], delay time.Duration) {
 	slog.Debug("message requeue", "msgID", m.ID, "delay", delay)
 
-	if delay == 0 {
+	if delay <= 0 {
 		s.SendMessage(m)
 		return
 	}
@@ -176,6 +210,7 @@ func (s *Subscriber[T]) OnRequeue(m *EventMessage[T], delay time.Duration) {
 func (s *Subscriber[T]) OnTouch(*EventMessage[T]) {
 }
 
+// StartDeferredTimeout 开始延迟处理消息
 func (s *Subscriber[T]) StartDeferredTimeout(msg *EventMessage[T], delay time.Duration) {
 	absTs := time.Now().Add(delay).UnixMilli()
 	item := &pqueue.Item{
@@ -191,8 +226,8 @@ func (s *Subscriber[T]) addToDeferredPQ(item *pqueue.Item) {
 	s.deferredMutex.Unlock()
 }
 
-// Wait 等待所有消息处理完成，方便测试消息处理进度，不建议在生产环境中使用
-func (s *Subscriber[T]) Wait() {
+// WaitMessage 等待所有消息处理完成，方便测试消息处理进度，不建议在生产环境中使用
+func (s *Subscriber[T]) WaitMessage() {
 	for {
 		s.deferredMutex.Lock()
 		l := s.deferredPQ.Len()
@@ -202,4 +237,10 @@ func (s *Subscriber[T]) Wait() {
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
+}
+
+// Wait 等待订阅者执行 stop 方法
+func (s *Subscriber[T]) Wait() {
+	<-s.exit
+	s.WaitMessage()
 }
