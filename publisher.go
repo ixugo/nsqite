@@ -1,6 +1,7 @@
 package nsqite
 
 import (
+	"context"
 	"time"
 
 	"github.com/google/uuid"
@@ -15,14 +16,25 @@ func NewPublisher[T any]() *Publisher[T] {
 }
 
 // Publish 发布消息
-func (p *Publisher[T]) Publish(topic string, msg T) {
-	eventBus.Publish(topic, &EventMessage[T]{
+// 此函数会返回 err，正常使用发布订阅不会出错，可以直接丢弃 err 不处理
+// 如果使用 PublishWithContext 则需要处理 err
+// 有哪些情况会触发 err 呢?
+// 1. 没有订阅时发布
+// 2. 使用 PublishWithContext 发布超时，订阅者没有足够的能力快速处理任务
+func (p *Publisher[T]) Publish(topic string, msg T) error {
+	return eventBus.Publish(context.Background(), topic, &EventMessage[T]{
 		ID:        uuid.New().String(),
 		Body:      msg,
 		Timestamp: time.Now().UnixMilli(),
 	})
 }
 
-// Stop 停止消息发布者
-func (p *Publisher[T]) Stop() {
+// PublishWithContext 发布消息
+// 如果需要限制发布超时，请使用此函数，可以根据返回的 err 判断是否发布超时
+func (p *Publisher[T]) PublishWithContext(ctx context.Context, topic string, msg T) error {
+	return eventBus.Publish(ctx, topic, &EventMessage[T]{
+		ID:        uuid.New().String(),
+		Body:      msg,
+		Timestamp: time.Now().UnixMilli(),
+	})
 }

@@ -54,6 +54,7 @@ func main() {
 	c.AddConcurrentHandlers(&Reader1{}, 5)
 
 	for i := 0; i < 5; i++ {
+		// 此函数会返回 err，正常使用发布订阅不会出错，可以直接丢弃 err 不处理
 		p.Publish(topic, fmt.Sprintf("a >> hello %d", i))
 	}
 
@@ -88,7 +89,9 @@ func (r *Reader3) HandleMessage(message *EventMessage[string]) error {
 
 ### 事务消息(后台任务，基于数据库持久化)
 
-基于数据库实现，支持 GORM，支持事务发布消息
+基于数据库实现，支持 GORM，支持事务发布消息，由生产者与消费者组成
+
+如果有不使用 gorm 且使用此项目的用户，你可以提出 issus，让我们一起想点办法不依赖 gorm。
 
 为什么消息队列没有考虑使用泛型? 需要持久化，由调用者选择序列化/反序列化方式，消息全部按字节数组存储。
 
@@ -98,3 +101,12 @@ func (r *Reader3) HandleMessage(message *EventMessage[string]) error {
 p := NewProducer(10)
 c := NewConsumer(topic, "comsumer1")
 ```
+
+
+### 维护与优化
+
+内置了使用 slog 记录日志，如果遇到以下 Warn 级别日志，应及时优化参数
+
+`[NSQite] publish message timeout` 说明发布太快，消费者跟不上，参数调优可以增加缓存队列长度，或增加并发处理协程，默认参数一般是够的，也许应该考虑是不是消费者回调函数还可以更快一些。
+
+超时时间，默认是 3 秒，如果发生超时，这可能会导致日志记录非常频繁，可以在创建订阅者时 `WithCheckTimeout(10*time.Second)` 来调整。

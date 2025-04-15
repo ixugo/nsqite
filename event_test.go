@@ -1,6 +1,7 @@
 package nsqite
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"sync"
@@ -282,5 +283,54 @@ func TestResourceCleanup(t *testing.T) {
 	// 验证新消息是否未被接收
 	if _, ok := reader1.receivedMessages.Load("after-cleanup-message"); ok {
 		t.Error("Message was received after cleanup, which should not happen")
+	}
+}
+
+// 测试发布超时
+func TestPublishTimeout(t *testing.T) {
+	t.Parallel()
+	const topic = "timeout-test"
+
+	// 创建发布者和订阅者
+	p := NewPublisher[string]()
+	s := NewSubscriber(topic, "timeout-consumer", WithQueueSize[string](1))
+
+	// 创建一个处理消息很慢的处理器
+	cache := make(map[string]struct{})
+	s.AddConcurrentHandlers(HandlerFunc[string](func(message *EventMessage[string]) error {
+		time.Sleep(1 * time.Second)
+		cache[message.Body] = struct{}{}
+		return nil
+	}), 1)
+	p.Publish(topic, "timeout-message")
+	p.Publish(topic, "timeout-message")
+
+	// 创建一个带有短超时的上下文
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	// 发布消息，应该超时
+	err := p.PublishWithContext(ctx, topic, "timeout-message")
+
+	// 验证是否返回了超时错误
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("预期发布超时错误，但得到了: %v", err)
+	}
+
+	// 使用足够长的超时时间再次尝试
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel2()
+
+	err = p.PublishWithContext(ctx2, topic, "success-message")
+	if err != nil {
+		t.Errorf("使用足够长的超时时间发布应该成功，但得到了错误: %v", err)
+	}
+
+	// 等待消息处理完成
+	s.WaitMessage()
+
+	// 验证成功消息是否被接收
+	if _, ok := cache["success-message"]; !ok {
+		t.Error("成功消息未被接收")
 	}
 }

@@ -2,6 +2,7 @@ package nsqite
 
 import (
 	"container/heap"
+	"context"
 	"log/slog"
 	"sync"
 	"sync/atomic"
@@ -9,6 +10,8 @@ import (
 
 	"github.com/ixugo/nsqite/pqueue"
 )
+
+const defaultPubTimeout = 3 * time.Second
 
 var (
 	_ SubscriberInfo               = (*Subscriber[string])(nil)
@@ -35,12 +38,15 @@ type Subscriber[T any] struct {
 
 	deferredPQ    pqueue.PriorityQueue
 	deferredMutex sync.Mutex
+
+	checkTimeout time.Duration // 检查消息超时时间，用于性能优化
 }
 
 // SubscriberOption 消息订阅者选项
 type SubscriberOption[T any] func(*Subscriber[T])
 
 // WithQueueSize 设置消息队列大小
+// WithQueueSize(0) 表示无缓冲队列
 func WithQueueSize[T any](size uint16) SubscriberOption[T] {
 	return func(s *Subscriber[T]) {
 		s.queueSize = size
@@ -51,6 +57,16 @@ func WithQueueSize[T any](size uint16) SubscriberOption[T] {
 func WithMaxAttempts[T any](maxAttempts uint32) SubscriberOption[T] {
 	return func(s *Subscriber[T]) {
 		s.MaxAttempts = maxAttempts
+	}
+}
+
+// WithCheckTimeout 设置消息检查超时时间
+func WithCheckTimeout[T any](checkTimeout time.Duration) SubscriberOption[T] {
+	return func(s *Subscriber[T]) {
+		if checkTimeout <= 0 {
+			checkTimeout = defaultPubTimeout
+		}
+		s.checkTimeout = checkTimeout
 	}
 }
 
@@ -65,25 +81,36 @@ func (s *Subscriber[T]) GetTopic() string {
 }
 
 // SendMessage implements SubscriberInfo.
-func (s *Subscriber[T]) SendMessage(msg interface{}) {
-	if typedMsg, ok := msg.(*EventMessage[T]); ok {
-		typedMsg.Delegate = s
-		s.incomingMessages <- typedMsg
-	} else {
+func (s *Subscriber[T]) SendMessage(ctx context.Context, msg interface{}) error {
+	typedMsg, ok := msg.(*EventMessage[T])
+	if !ok {
 		panic("message type not supported")
+	}
+	typedMsg.Delegate = s
+	for {
+		select {
+		case s.incomingMessages <- typedMsg:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(s.checkTimeout):
+			slog.Warn("[NSQite] publish message timeout", "msgID", typedMsg.ID, "topic", s.topic, "channel", s.channel)
+			continue
+		}
 	}
 }
 
 // NewSubscriber 创建消息订阅者
 func NewSubscriber[T any](topic, channel string, opts ...SubscriberOption[T]) *Subscriber[T] {
 	c := Subscriber[T]{
-		topic:       topic,
-		channel:     channel,
-		log:         slog.Default().With("topic", topic, "channel", channel),
-		queueSize:   128,
-		deferredPQ:  pqueue.New(8),
-		MaxAttempts: 10,
-		exit:        make(chan struct{}),
+		topic:        topic,
+		channel:      channel,
+		log:          slog.Default().With("topic", topic, "channel", channel),
+		queueSize:    128,
+		deferredPQ:   pqueue.New(8),
+		MaxAttempts:  10,
+		exit:         make(chan struct{}),
+		checkTimeout: defaultPubTimeout,
 	}
 	for _, opt := range opts {
 		opt(&c)
@@ -199,7 +226,7 @@ func (s *Subscriber[T]) OnRequeue(m *EventMessage[T], delay time.Duration) {
 	slog.Debug("message requeue", "msgID", m.ID, "delay", delay)
 
 	if delay <= 0 {
-		s.SendMessage(m)
+		s.SendMessage(context.Background(), m)
 		return
 	}
 

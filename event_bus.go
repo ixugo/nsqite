@@ -1,12 +1,16 @@
 package nsqite
 
-import "sync"
+import (
+	"context"
+	"fmt"
+	"sync"
+)
 
 // SubscriberInfo 定义了获取订阅者信息的接口
 type SubscriberInfo interface {
 	GetTopic() string
 	GetChannel() string
-	SendMessage(msg interface{})
+	SendMessage(ctx context.Context, msg interface{}) error
 }
 
 var eventBus = NewEventBus()
@@ -47,16 +51,19 @@ func (s *EventBus) DelConsumer(c SubscriberInfo) {
 	delete(s.consumers[topic], channel)
 }
 
-func (s *EventBus) Publish(topic string, msg interface{}) {
+func (s *EventBus) Publish(ctx context.Context, topic string, msg interface{}) error {
 	s.m.RLock()
 	defer s.m.RUnlock()
 
 	consumers, ok := s.consumers[topic]
 	if !ok {
-		return
+		return fmt.Errorf("topic %s not found", topic)
 	}
 
 	for _, c := range consumers {
-		c.SendMessage(msg)
+		if err := c.SendMessage(ctx, msg); err != nil {
+			return err
+		}
 	}
+	return nil
 }
