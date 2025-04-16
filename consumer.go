@@ -28,8 +28,6 @@ type Consumer struct {
 
 	pendingMessages int32
 
-	log *slog.Logger
-
 	deferredPQ    pqueue.PriorityQueue
 	deferredMutex sync.Mutex
 
@@ -61,7 +59,6 @@ func NewConsumer(topic, channel string, opts ...ConsumerOption) *Consumer {
 	c := Consumer{
 		topic:               topic,
 		channel:             channel,
-		log:                 slog.Default().With("topic", topic, "channel", channel),
 		MaxAttempts:         10,
 		queueSize:           128,
 		deferredPQ:          pqueue.New(8),
@@ -133,9 +130,13 @@ func (c *Consumer) handlerLoop(handler MessageHandler) {
 	}
 }
 
+func (c *Consumer) log() *slog.Logger {
+	return slog.Default().With("topic", c.topic, "channel", c.channel)
+}
+
 func (c *Consumer) shouldFailMessage(attempts uint32) bool {
 	if c.MaxAttempts > 0 && attempts > c.MaxAttempts {
-		c.log.Warn("[NSQite] message attempts limit reached", "attempts", attempts)
+		c.log().Warn("[NSQite] message attempts limit reached", "attempts", attempts)
 		return true
 	}
 	return false
@@ -186,20 +187,20 @@ func (c *Consumer) SendMessage(msg *Message) error {
 
 // OnFinish implements MessageDelegate.
 func (c *Consumer) OnFinish(msg *Message) {
-	c.log.Debug("[NSQite] message finished", "msgID", msg.ID)
+	c.log().Debug("[NSQite] message finished", "msgID", msg.ID)
 
 	c.incomingMutex.Lock()
 	delete(c.incomingMessagesMap, msg.ID)
 	c.incomingMutex.Unlock()
 
 	if err := TransactionMQ().Finish(msg, c.channel); err != nil {
-		c.log.Error("[NSQite] finish message", "err", err)
+		c.log().Error("[NSQite] finish message", "err", err)
 	}
 }
 
 // OnRequeue implements MessageDelegate.
 func (c *Consumer) OnRequeue(m *Message, delay time.Duration) {
-	c.log.Debug("[NSQite] message requeue", "msgID", m.ID, "delay", delay, "attempts", m.Attempts)
+	c.log().Debug("[NSQite] message requeue", "msgID", m.ID, "delay", delay, "attempts", m.Attempts)
 
 	if delay <= 0 {
 		c.SendMessage(m)
@@ -210,7 +211,7 @@ func (c *Consumer) OnRequeue(m *Message, delay time.Duration) {
 
 // OnTouch implements MessageDelegate.
 func (c *Consumer) OnTouch(*Message) {
-	c.log.Debug("[NSQite] message touch")
+	c.log().Debug("[NSQite] message touch")
 }
 
 // StartDeferredTimeout 开始延迟处理消息

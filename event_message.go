@@ -6,7 +6,7 @@ import (
 )
 
 type EventMessage[T any] struct {
-	ID        string
+	ID        uint64
 	Body      T
 	Timestamp int64
 	Attempts  uint32

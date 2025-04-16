@@ -155,7 +155,7 @@ func (n *NSQite) messagePump() {
 			if count > DefaultMaxMessageRows {
 				days = 3
 			}
-			if err := n.db.Table(msg.TableName()).Where("responded >= consumers && timestamp < ?", time.Now().AddDate(0, 0, -days)).Delete(nil).Error; err != nil {
+			if err := n.db.Table(msg.TableName()).Where("responded >= consumers AND timestamp < ?", time.Now().AddDate(0, 0, -days)).Delete(nil).Error; err != nil {
 				slog.Error("messagePump", "error", err)
 				continue
 			}
@@ -186,23 +186,24 @@ func (n *NSQite) messagePump() {
 
 func (n *NSQite) Finish(msg *Message, channel string) error {
 	return n.db.Transaction(func(tx *gorm.DB) error {
-		var message Message
-		if err := tx.Table(msg.TableName()).Where("id=?", msg.ID).Clauses(clause.Locking{Strength: "UPDATE"}).First(&message).Error; err != nil {
+		if err := tx.Table(msg.TableName()).Clauses(clause.Locking{Strength: "UPDATE"}).First(msg).Error; err != nil {
 			return err
 		}
 
-		chs := strings.Split(message.RespondedChannels, ",")
+		channels := make([]string, 0, 8)
+
+		chs := strings.Split(msg.RespondedChannels, ",")
 		for _, ch := range chs {
 			if ch == channel {
 				return nil
 			}
+			if ch != "" {
+				channels = append(channels, ch)
+			}
 		}
-		if chs[0] == "" {
-			chs = chs[1:]
-		}
-		message.RespondedChannels = strings.Join(append(chs, channel), ",")
-		message.Responded++
-		return tx.Table(msg.TableName()).Save(&message).Error
+		msg.RespondedChannels = strings.Join(append(channels, channel), ",")
+		msg.Responded++
+		return tx.Table(msg.TableName()).Where("id=?", msg.ID).Select("responded_channels", "responded").Updates(msg).Error
 	})
 }
 

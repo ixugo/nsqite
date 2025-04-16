@@ -2,10 +2,11 @@ package nsqite
 
 import (
 	"context"
+	"sync/atomic"
 	"time"
-
-	"github.com/google/uuid"
 )
+
+var guid uint64
 
 // Publisher 消息发布者
 type Publisher[T any] struct{}
@@ -23,7 +24,7 @@ func NewPublisher[T any]() *Publisher[T] {
 // 2. 使用 PublishWithContext 发布超时，订阅者没有足够的能力快速处理任务
 func (p *Publisher[T]) Publish(topic string, msg T) error {
 	return eventBus.Publish(context.Background(), topic, &EventMessage[T]{
-		ID:        uuid.New().String(),
+		ID:        atomic.AddUint64(&guid, 1),
 		Body:      msg,
 		Timestamp: time.Now().UnixMilli(),
 	})
@@ -33,7 +34,7 @@ func (p *Publisher[T]) Publish(topic string, msg T) error {
 // 如果需要限制发布超时，请使用此函数，可以根据返回的 err 判断是否发布超时
 func (p *Publisher[T]) PublishWithContext(ctx context.Context, topic string, msg T) error {
 	return eventBus.Publish(ctx, topic, &EventMessage[T]{
-		ID:        uuid.New().String(),
+		ID:        atomic.AddUint64(&guid, 1),
 		Body:      msg,
 		Timestamp: time.Now().UnixMilli(),
 	})

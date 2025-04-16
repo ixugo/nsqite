@@ -18,6 +18,23 @@ var (
 	_ EventMessageDelegate[string] = (*Subscriber[string])(nil)
 )
 
+var timerPool = sync.Pool{
+	New: func() any {
+		return time.NewTimer(0)
+	},
+}
+
+func After(d time.Duration) *time.Timer {
+	t := timerPool.Get().(*time.Timer)
+	t.Reset(d)
+	return t
+}
+
+// PutBack 将计时器放回池中
+func PutBack(t *time.Timer) {
+	timerPool.Put(t)
+}
+
 // Subscriber 消息订阅者
 type Subscriber[T any] struct {
 	topic, channel   string
@@ -28,8 +45,6 @@ type Subscriber[T any] struct {
 	runningHandlers int32
 
 	MaxAttempts uint32
-
-	log *slog.Logger
 
 	queueSize uint16
 
@@ -89,16 +104,19 @@ func (s *Subscriber[T]) SendMessage(ctx context.Context, msg interface{}) error 
 	typedMsg.Delegate = s
 
 	var recordedLog bool
+
+	timer := After(s.checkTimeout)
+	defer PutBack(timer)
 	for {
 		select {
 		case s.incomingMessages <- typedMsg:
 			return nil
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-time.After(s.checkTimeout):
+		case <-timer.C:
 			// 避免重复打印日志
 			if !recordedLog {
-				slog.Warn("[NSQite] publish message timeout", "msgID", typedMsg.ID, "topic", s.topic, "channel", s.channel)
+				s.log().Warn("[NSQite] publish message timeout", "msgID", typedMsg.ID, "topic", s.topic, "channel", s.channel)
 				recordedLog = true
 			}
 			continue
@@ -111,7 +129,6 @@ func NewSubscriber[T any](topic, channel string, opts ...SubscriberOption[T]) *S
 	c := Subscriber[T]{
 		topic:        topic,
 		channel:      channel,
-		log:          slog.Default().With("topic", topic, "channel", channel),
 		queueSize:    128,
 		deferredPQ:   pqueue.New(8),
 		MaxAttempts:  10,
@@ -208,9 +225,13 @@ func (s *Subscriber[T]) handlerLoop(handler EventHandler[T]) {
 	}
 }
 
+func (s *Subscriber[T]) log() *slog.Logger {
+	return slog.Default().With("topic", s.topic, "channel", s.channel)
+}
+
 func (s *Subscriber[T]) shouldFailMessage(attempts uint32) bool {
 	if s.MaxAttempts > 0 && attempts > s.MaxAttempts {
-		s.log.Warn("message attempts limit reached", "attempts", attempts)
+		s.log().Warn("message attempts limit reached", "attempts", attempts)
 		return true
 	}
 	return false
@@ -227,12 +248,11 @@ func (s *Subscriber[T]) Stop() {
 
 // OnFinish implements MessageDelegate.
 func (s *Subscriber[T]) OnFinish(msg *EventMessage[T]) {
-	slog.Debug("message finished", "msgID", msg.ID)
 }
 
 // OnRequeue implements MessageDelegate.
 func (s *Subscriber[T]) OnRequeue(m *EventMessage[T], delay time.Duration) {
-	slog.Debug("message requeue", "msgID", m.ID, "delay", delay)
+	s.log().Debug("message requeue", "msgID", m.ID, "delay", delay)
 
 	if delay <= 0 {
 		s.SendMessage(context.Background(), m)

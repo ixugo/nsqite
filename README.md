@@ -20,7 +20,7 @@ NSQite's API design is similar to go-nsq, making it easy to upgrade to NSQ in th
 
 Note: NSQite guarantees at-least-once message delivery, which means duplicate messages may occur. Consumers need to implement deduplication or idempotent operations.
 
-![](./doc.gif)
+![](./docs/1.gif)
 
 ## Quick Start
 
@@ -186,3 +186,15 @@ NSQite uses slog for logging. If you see the following warning logs, you need to
   - Optimizing consumer handler performance
 
 Default timeout is 3 seconds. If timeouts occur frequently, adjust the timeout using `WithCheckTimeout(10*time.Second)`.
+
+## Benchmark
+
+**Event Bus**
+
+One publisher, one subscriber, 3 million concurrent messages per second
+![](./docs/bus.webp)
+
+**Transactional Message Queue**
+
+One producer, one consumer, based on SQLite database, performance is barely satisfactory. PostgreSQL will provide better performance
+![](./docs/mq.webp)

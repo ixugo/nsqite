@@ -19,7 +19,7 @@ NSQite 的 API 设计与 go-nsq 类似，方便未来项目升级到 NSQ 以支�
 
 注意：NSQite 保证消息至少被传递一次，可能会出现重复消息。消费者需要实现去重或幂等操作。
 
-![](./doc.gif)
+![](./docs/1.gif)
 
 ## 快速开始
 
@@ -128,7 +128,6 @@ type Reader1 struct{}
 
 // HandleMessage implements Handler.
 func (r *Reader1) HandleMessage(message *EventMessage[string]) error {
-	time.Sleep(time.Second)
 	fmt.Println("reader one :", message.Body)
 	return nil
 }
@@ -144,37 +143,12 @@ func main() {
 	c := NewConsumer(topic, "comsumer1")
 	c.AddConcurrentHandlers(&Reader1{}, 5)
 	for i := 0; i < 5; i++ {
-		// 此函数会返回 err，正常使用发布订阅不会出错，可以直接丢弃 err 不处理
 		p.Publish(topic, fmt.Sprintf("a >> hello %d", i))
 	}
-
 	time.Sleep(2 * time.Second)
 }
 ```
 
-#### 手动控制消息处理
-```go
-type Reader3 struct {
-	receivedMessages sync.Map
-	attemptCount     int32
-}
-
-// HandleMessage implements Handler.
-func (r *Reader3) HandleMessage(message *EventMessage[string]) error {
-	// 禁用自动完成
-	message.DisableAutoResponse()
-	if message.Body == "hello" || message.Attempts > 3 {
-		// 手动完成
-		r.receivedMessages.Store(message.Body, true)
-		message.Finish()
-		return nil
-	}
-	// 手动延迟 1 秒后重试
-	atomic.AddInt32(&r.attemptCount, 1)
-	message.Requeue(time.Second)
-	return nil
-}
-```
 
 ### 维护与优化
 
@@ -186,3 +160,15 @@ NSQite 使用 slog 记录日志，如果出现以下警告日志，需要及时�
   - 优化消费者处理函数性能
 
 默认超时时间为 3 秒，如果频繁出现超时，可以通过 `WithCheckTimeout(10*time.Second)` 调整超时时间。
+
+## Benchmark
+
+**事件总线**
+
+一个发布者，一个订阅者，每秒并发 300 百万
+![](./docs/bus.webp)
+
+**事务消息队列**
+
+一个生产者，一个消费者，基于 sqlite 数据库的，就差强人意了，使用 postgresql 会有更好的表现
+![](./docs/mq.webp)
