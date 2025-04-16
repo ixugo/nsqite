@@ -198,3 +198,8 @@ One publisher, one subscriber, 3 million concurrent messages per second
 
 One producer, one consumer, based on SQLite database, performance is barely satisfactory. PostgreSQL will provide better performance
 ![](./docs/mq.webp)
+
+## Next Development Tasks
+
+- Event Bus support for Redis as persistent storage, enabling distributed deployment
+- Transactional Message Queue support for distributed deployment, where consumers update the database after receiving messages
