@@ -1,342 +1,213 @@
 package nsqite
 
 import (
-	"context"
 	"fmt"
 	"log/slog"
+	"slices"
+	"strings"
 	"sync"
 	"time"
 
-	"github.com/google/uuid"
-	"github.com/ixugo/nsqite/storage"
+	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
+
+// DefaultMaxRetentionDays 定义消息的默认最大保留天数为7天
+// 超过此天数的消息将被自动清理
+const DefaultMaxRetentionDays = 7
+
+// DefaultMaxMessageRows 定义消息表的默认最大行数
+// 当消息表行数超过此值时，将仅保留最近3天的消息
+const DefaultMaxMessageRows = 10000
+
+var transactionMQ *NSQite
+
+var once sync.Once
+
+func TransactionMQ() *NSQite {
+	once.Do(func() {
+		transactionMQ = New(DB())
+	})
+	return transactionMQ
+}
 
 // NSQite 是消息队列的核心结构
 type NSQite struct {
-	store  storage.Storage
-	topics map[string]*Topic
-	mu     sync.RWMutex
-	ctx    context.Context
-	cancel context.CancelFunc
+	consumers map[string]map[string]*Consumer
+	m         sync.RWMutex
+
+	db   *gorm.DB
+	exit chan struct{}
+	once sync.Once
 }
 
 // New 创建一个新的NSQite实例
-func New(store storage.Storage) (*NSQite, error) {
-	ctx, cancel := context.WithCancel(context.Background())
-
+func New(db *gorm.DB) *NSQite {
 	nsqite := &NSQite{
-		store:  store,
-		topics: make(map[string]*Topic),
-		ctx:    ctx,
-		cancel: cancel,
+		db:        db,
+		exit:      make(chan struct{}),
+		consumers: make(map[string]map[string]*Consumer),
 	}
-
-	// 初始化存储
-	if err := store.Init(nil); err != nil {
-		return nil, fmt.Errorf("初始化存储失败: %w", err)
-	}
-
+	nsqite.db.AutoMigrate(
+		&Message{},
+	)
 	// 启动消息泵
 	go nsqite.messagePump()
-
-	return nsqite, nil
+	return nsqite
 }
 
 // Close 关闭NSQite实例
 func (n *NSQite) Close() error {
-	n.cancel()
-
-	// 关闭所有topics
-	n.mu.Lock()
-	for _, t := range n.topics {
-		t.Stop()
-	}
-	n.mu.Unlock()
-
-	// 关闭存储
-	return n.store.Close()
+	n.once.Do(func() {
+		close(n.exit)
+	})
+	return nil
 }
 
-// GetTopic 获取或创建Topic（懒加载）
-func (n *NSQite) GetTopic(name string) (*Topic, error) {
-	n.mu.RLock()
-	t, ok := n.topics[name]
-	n.mu.RUnlock()
-
-	if ok {
-		return t, nil
+func (n *NSQite) consumer(topic string) map[string]*Consumer {
+	n.m.RLock()
+	consumers, ok := n.consumers[topic]
+	n.m.RUnlock()
+	if !ok {
+		consumers = make(map[string]*Consumer)
+		n.consumers[topic] = consumers
 	}
-
-	n.mu.Lock()
-	defer n.mu.Unlock()
-
-	// 双重检查
-	if t, ok = n.topics[name]; ok {
-		return t, nil
-	}
-
-	// 创建新Topic（仅在内存中）
-	t = NewTopic(name)
-	n.topics[name] = t
-	slog.Debug("创建新Topic", "topic", name)
-
-	return t, nil
+	return consumers
 }
 
-// CreateChannel 创建一个新的Channel
-func (n *NSQite) CreateChannel(topicName, channelName string) (*nsqChannel, error) {
-	// 获取或创建Topic（懒加载）
-	t, err := n.GetTopic(topicName)
-	if err != nil {
-		return nil, err
+func (n *NSQite) PublishTx(tx *gorm.DB, topic string, msg *Message) error {
+	c := n.consumer(topic)
+	chs := make([]string, 0, 8)
+	for _, consumer := range c {
+		chs = append(chs, consumer.channel)
 	}
-
-	// 检查Channel是否已存在
-	if ch := t.GetChannel(channelName); ch != nil {
-		return ch, nil
+	msg.Consumers = uint32(len(chs))
+	msg.Channels = strings.Join(chs, ",")
+	if err := tx.Create(msg).Error; err != nil {
+		return err
 	}
-
-	// 创建Channel
-	ch := NewChannel(topicName, channelName)
-
-	// 添加到Topic
-	t.AddChannel(ch)
-
-	// 保存到存储
-	channelModel := &storage.Channel{
-		Topic:     topicName, // 使用 Topic 的 Name 作为 ID
-		Name:      channelName,
-		CreatedAt: time.Now(),
-		UpdatedAt: time.Now(),
-	}
-
-	if err := n.store.AddChannel(channelModel); err != nil {
-		return nil, fmt.Errorf("保存Channel失败: %w", err)
-	}
-
-	return ch, nil
-}
-
-// GetChannel 获取Channel
-func (n *NSQite) GetChannel(topicName, channelName string) (*nsqChannel, error) {
-	topic, err := n.GetTopic(topicName)
-	if err != nil {
-		return nil, err
-	}
-
-	channel := topic.GetChannel(channelName)
-	if channel == nil {
-		return nil, fmt.Errorf("Channel不存在: %s/%s", topicName, channelName)
-	}
-
-	return channel, nil
+	return nil
 }
 
 // Publish 发布消息到Topic
-func (n *NSQite) Publish(topicName string, body []byte) error {
-	return n.PublishWithContext(context.Background(), topicName, body)
-}
+func (n *NSQite) Publish(topic string, msg *Message) error {
+	n.m.RLock()
+	consumers, ok := n.consumers[topic]
+	n.m.RUnlock()
+	if !ok {
+		return fmt.Errorf("topic %s need consumers", topic)
+	}
 
-func (n *NSQite) PublishTx(ctx context.Context, topic string, body []byte) error {
-	// return n.store.Tx(ctx, func(ctx context.Context) error {
-	// return n.PublishWithContext(ctx, topicName, body)
-	// })
-	return nil
-}
-
-// PublishWithContext 带上下文的发布消息
-func (n *NSQite) PublishWithContext(ctx context.Context, topic string, body []byte) error {
-	// 获取或创建Topic（懒加载）
-	t, err := n.GetTopic(topic)
-	if err != nil {
+	if err := n.PublishTx(n.db, topic, msg); err != nil {
 		return err
 	}
-
-	// 创建消息
-	msgID := uuid.New().String()
-	message := &storage.Message{
-		ID:        msgID,
-		Topic:     t.Name,
-		Body:      body,
-		CreatedAt: time.Now(),
-	}
-
-	// 保存消息
-	if err := n.store.SaveMessage(message); err != nil {
-		return fmt.Errorf("保存消息失败: %w", err)
-	}
-
-	// 创建NSQite消息
-	nsqMsg := &Message{
-		ID:        msgID,
-		Body:      body,
-		CreatedAt: time.Now(),
-		Delegate:  &MDelegate{},
-	}
-
-	// 添加到Topic
-	t.AddMessage(nsqMsg)
-
-	// 为每个Channel创建ChannelMessage
-	channels, err := n.store.FindChannels(topic)
-	if err != nil {
-		return fmt.Errorf("获取Channels失败: %w", err)
-	}
-
-	for _, ch := range channels {
-		channelMessage := &storage.ChannelMessage{
-			ChannelID: ch.ID,
-			MessageID: msgID,
-			CreatedAt: time.Now(),
-		}
-
-		if err := n.store.SaveChannelMessage(channelMessage); err != nil {
-			return fmt.Errorf("保存ChannelMessage失败: %w", err)
+	for _, c := range consumers {
+		if err := c.SendMessage(msg); err != nil {
+			return err
 		}
 	}
-
 	return nil
 }
 
-// Subscribe 订阅Topic的Channel
-func (n *NSQite) Subscribe(topicName, channelName string) (<-chan *Message, error) {
-	// 获取或创建Channel
-	_, err := n.CreateChannel(topicName, channelName)
-	if err != nil {
-		return nil, err
+func (n *NSQite) AddConsumer(c *Consumer) {
+	n.m.Lock()
+	defer n.m.Unlock()
+
+	consumer, ok := n.consumers[c.topic]
+	if !ok {
+		consumer = make(map[string]*Consumer)
+		n.consumers[c.topic] = consumer
 	}
+	consumer[c.channel] = c
+}
 
-	// 从存储订阅消息
-	storageMsgChan, err := n.store.Subscribe(topicName, channelName)
-	if err != nil {
-		return nil, err
-	}
-
-	// 转换为NSQite消息
-	msgChan := make(chan *Message, 100)
-	go func() {
-		defer close(msgChan)
-		for msg := range storageMsgChan {
-			nsqMsg := &Message{
-				ID:        msg.ID,
-				Body:      msg.Body,
-				CreatedAt: msg.CreatedAt,
-				Delegate:  &MDelegate{},
-			}
-			msgChan <- nsqMsg
-		}
-	}()
-
-	return msgChan, nil
+// GetTimeUntilMidnight 返回距离下一个凌晨12点的时间间隔
+func GetTimeUntilMidnight() time.Duration {
+	now := time.Now()
+	tomorrow := now.Add(24 * time.Hour)
+	midnight := time.Date(tomorrow.Year(), tomorrow.Month(), tomorrow.Day(), 0, 0, 0, 0, tomorrow.Location())
+	return midnight.Sub(now)
 }
 
 // messagePump 消息泵，处理消息超时和重试
 func (n *NSQite) messagePump() {
-	ticker := time.NewTicker(time.Second)
-	defer ticker.Stop()
+	timer := time.NewTimer(3 * time.Second)
+	defer timer.Stop()
 
+	cleanUpTimer := time.NewTimer(GetTimeUntilMidnight())
+	defer cleanUpTimer.Stop()
+
+	var id int
+	var msg Message
+	var count int64
+	msgs := make([]Message, 0, 24)
 	for {
 		select {
-		case <-n.ctx.Done():
+		case <-n.exit:
 			return
-		case <-ticker.C:
-			// 检查所有Topic的Channel
-			n.mu.RLock()
-			for _, topic := range n.topics {
-				topic.mu.RLock()
-				for _, channel := range topic.channels {
-					// 获取未完成的消息
-					channelMessages, err := n.store.FindChannelMessages(
-						int(channel.ID),
-						1, // delivered
-						0, // finished
-						0, // requeued
-						100,
-						0,
-					)
-					if err != nil {
-						slog.Error("获取未完成消息失败", "error", err, "channel", channel.Name)
-						continue
-					}
+		case <-cleanUpTimer.C:
+			cleanUpTimer.Reset(GetTimeUntilMidnight())
+			if err := n.db.Table(msg.TableName()).Where("responded >= consumers").Count(&count).Error; err != nil {
+				slog.Error("messagePump", "error", err)
+				continue
+			}
+			days := DefaultMaxRetentionDays
+			if count > DefaultMaxMessageRows {
+				days = 3
+			}
+			if err := n.db.Table(msg.TableName()).Where("responded >= consumers && timestamp < ?", time.Now().AddDate(0, 0, -days)).Delete(nil).Error; err != nil {
+				slog.Error("messagePump", "error", err)
+				continue
+			}
+		case <-timer.C:
+			timer.Reset(10 * time.Second)
+			msgs = msgs[:0]
+			if err := n.db.Table(msg.TableName()).Order("id ASC").Where("id > ? AND responded<consumers", id).Find(&msgs).Error; err != nil {
+				slog.Error("messagePump", "error", err)
+				continue
+			}
+			if len(msgs) > 0 {
+				id = msgs[len(msgs)-1].ID
+			}
 
-					now := time.Now()
-					for _, cm := range channelMessages {
-						// 如果消息超过30秒未完成，重新入队
-						if now.Sub(cm.CreatedAt) > 30*time.Second {
-							cm.Requeued = true
-							cm.RequeuedAt = now
-
-							if err := n.store.EditChannelMessage(cm); err != nil {
-								slog.Error("更新超时消息失败", "error", err, "messageID", cm.MessageID)
-								continue
-							}
-
-							// 获取消息
-							message, err := n.store.GetMessage(cm.MessageID)
-							if err != nil {
-								slog.Error("获取消息失败", "error", err, "messageID", cm.MessageID)
-								continue
-							}
-
-							// 创建NSQite消息
-							nsqMsg := &Message{
-								ID:        message.ID,
-								Body:      message.Body,
-								CreatedAt: message.CreatedAt,
-								Delegate:  &MDelegate{},
-								Timeout:   30 * time.Second,
-							}
-
-							// 重新入队
-							channel.RequeueMessage(nsqMsg)
-						}
+			for _, m := range msgs {
+				consumers := n.consumer(m.Topic)
+				chs := strings.Split(m.RespondedChannels, ",")
+				for _, c := range consumers {
+					if !slices.Contains(chs, c.channel) {
+						c.sendMessage(&m)
 					}
 				}
-				topic.mu.RUnlock()
 			}
-			n.mu.RUnlock()
+			timer.Reset(3 * time.Second)
 		}
 	}
 }
 
-// RequeueMessage 重新入队消息
-func (n *NSQite) RequeueMessage(topicName, channelName, messageID string, timeout time.Duration) error {
-	// 获取Channel
-	channel, err := n.GetChannel(topicName, channelName)
-	if err != nil {
-		return err
-	}
+func (n *NSQite) Finish(msg *Message, channel string) error {
+	return n.db.Transaction(func(tx *gorm.DB) error {
+		var message Message
+		if err := tx.Table(msg.TableName()).Where("id=?", msg.ID).Clauses(clause.Locking{Strength: "UPDATE"}).First(&message).Error; err != nil {
+			return err
+		}
 
-	// 获取消息
-	msg, err := n.store.GetMessage(messageID)
-	if err != nil {
-		return err
-	}
+		chs := strings.Split(message.RespondedChannels, ",")
+		for _, ch := range chs {
+			if ch == channel {
+				return nil
+			}
+		}
+		if chs[0] == "" {
+			chs = chs[1:]
+		}
+		message.RespondedChannels = strings.Join(append(chs, channel), ",")
+		message.Responded++
+		return tx.Table(msg.TableName()).Save(&message).Error
+	})
+}
 
-	// 创建NSQite消息
-	nsqMsg := &Message{
-		ID:        msg.ID,
-		Body:      msg.Body,
-		CreatedAt: msg.CreatedAt,
-		Delegate:  &MDelegate{},
-		Timeout:   timeout,
-	}
-
-	// 重新入队消息
-	channel.RequeueMessage(nsqMsg)
-
-	// 更新ChannelMessage状态
-	cm, err := n.store.GetChannelMessage(int(channel.ID), messageID)
-	if err != nil {
-		return err
-	}
-
-	cm.Requeued = true
-	cm.RequeuedAt = time.Now()
-
-	if err := n.store.EditChannelMessage(cm); err != nil {
-		return err
-	}
-
-	return nil
+func (n *NSQite) DelConsumer(c *Consumer) {
+	n.m.Lock()
+	defer n.m.Unlock()
+	delete(n.consumers[c.topic], c.channel)
 }

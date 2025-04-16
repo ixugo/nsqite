@@ -53,7 +53,7 @@ func WithQueueSize[T any](size uint16) SubscriberOption[T] {
 	}
 }
 
-// WithMaxAttempts 设置消息最大重试次数
+// WithMaxAttempts 设置消息最大重试次数，其次数是最终回调函数执行次数
 func WithMaxAttempts[T any](maxAttempts uint32) SubscriberOption[T] {
 	return func(s *Subscriber[T]) {
 		s.MaxAttempts = maxAttempts
@@ -87,6 +87,8 @@ func (s *Subscriber[T]) SendMessage(ctx context.Context, msg interface{}) error 
 		panic("message type not supported")
 	}
 	typedMsg.Delegate = s
+
+	var recordedLog bool
 	for {
 		select {
 		case s.incomingMessages <- typedMsg:
@@ -94,7 +96,11 @@ func (s *Subscriber[T]) SendMessage(ctx context.Context, msg interface{}) error 
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-time.After(s.checkTimeout):
-			slog.Warn("[NSQite] publish message timeout", "msgID", typedMsg.ID, "topic", s.topic, "channel", s.channel)
+			// 避免重复打印日志
+			if !recordedLog {
+				slog.Warn("[NSQite] publish message timeout", "msgID", typedMsg.ID, "topic", s.topic, "channel", s.channel)
+				recordedLog = true
+			}
 			continue
 		}
 	}
@@ -117,7 +123,7 @@ func NewSubscriber[T any](topic, channel string, opts ...SubscriberOption[T]) *S
 	}
 	c.incomingMessages = make(chan *EventMessage[T], c.queueSize)
 	c.backendMessage = make(chan *EventMessage[T], c.queueSize/4+1)
-	eventBus.AddConsumer(&c)
+	eventBus.AddSubscriber(&c)
 	return &c
 }
 
@@ -136,6 +142,7 @@ func (s *Subscriber[T]) AddConcurrentHandlers(handler EventHandler[T], concurren
 func (s *Subscriber[T]) backendLoop() {
 	timer := time.NewTimer(100 * time.Millisecond)
 	defer timer.Stop()
+
 	for {
 		select {
 		case <-timer.C:
@@ -171,13 +178,15 @@ func (s *Subscriber[T]) handlerLoop(handler EventHandler[T]) {
 		select {
 		case msg, ok = <-s.incomingMessages:
 		case msg, ok = <-s.backendMessage:
+		case <-s.exit:
+			return
 		}
 		if !ok {
 			return
 		}
 
-		atomic.AddUint32(&msg.Attempts, 1)
-		if s.shouldFailMessage(msg) {
+		attempts := atomic.AddUint32(&msg.Attempts, 1)
+		if s.shouldFailMessage(attempts) {
 			msg.Finish()
 			continue
 		}
@@ -199,9 +208,9 @@ func (s *Subscriber[T]) handlerLoop(handler EventHandler[T]) {
 	}
 }
 
-func (s *Subscriber[T]) shouldFailMessage(msg *EventMessage[T]) bool {
-	if s.MaxAttempts > 0 && msg.Attempts > s.MaxAttempts {
-		s.log.Warn("message attempts limit reached", "attempts", msg.Attempts, "msgID", msg.ID)
+func (s *Subscriber[T]) shouldFailMessage(attempts uint32) bool {
+	if s.MaxAttempts > 0 && attempts > s.MaxAttempts {
+		s.log.Warn("message attempts limit reached", "attempts", attempts)
 		return true
 	}
 	return false
@@ -253,16 +262,17 @@ func (s *Subscriber[T]) addToDeferredPQ(item *pqueue.Item) {
 	s.deferredMutex.Unlock()
 }
 
-// WaitMessage 等待所有消息处理完成，方便测试消息处理进度，不建议在生产环境中使用
+// WaitMessage waits for all messages to be processed, convenient for testing message processing progress, not recommended for use in production environments
+// 等待所有消息处理完成，方便测试消息处理进度，不建议在生产环境中使用
 func (s *Subscriber[T]) WaitMessage() {
 	for {
+		time.Sleep(100 * time.Millisecond)
 		s.deferredMutex.Lock()
 		l := s.deferredPQ.Len()
 		s.deferredMutex.Unlock()
 		if l == 0 && len(s.incomingMessages) == 0 && atomic.LoadInt32(&s.pendingMessages) == 0 {
 			return
 		}
-		time.Sleep(100 * time.Millisecond)
 	}
 }
 

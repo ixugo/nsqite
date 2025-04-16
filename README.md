@@ -3,7 +3,6 @@
     <img src="logo.webp" alt="NSQite Logo" width="550"/>
 </p>
 
-# NSQite
 
 [中文](./README_CN.md) [English](./README.md)
 
@@ -11,7 +10,7 @@ A lightweight message queue implemented in Go, supporting SQLite, PostgreSQL, an
 
 ## Introduction
 
-In the early stages of a project, you might not need large message queue systems like NSQ or Pulsar. NSQite provides a simple and reliable solution to meet basic message queue requirements.
+In the early stages of a project, you might not need large message queue systems like NSQ、NATs or Pulsar. NSQite provides a simple and reliable solution to meet basic message queue requirements.
 
 NSQite supports multiple storage methods:
 - SQLite as message queue persistence
@@ -21,7 +20,7 @@ NSQite's API design is similar to go-nsq, making it easy to upgrade to NSQ in th
 
 Note: NSQite guarantees at-least-once message delivery, which means duplicate messages may occur. Consumers need to implement deduplication or idempotent operations.
 
-![](./docs/1.gif)
+![](./doc.gif)
 
 ## Quick Start
 
@@ -136,14 +135,16 @@ func (r *Reader1) HandleMessage(message *EventMessage[string]) error {
 
 // Simulate an author writing books frantically, with 5 editors processing one book per second
 func main() {
-	const topic = "a-book"
-	p := NewPublisher[string]()
-	// Limit task failure retry attempts to 10 times
-	c := NewSubscriber(topic, "comsumer1", WithMaxAttempts[string](10))
-	c.AddConcurrentHandlers(&Reader1{}, 5)
+	// 1. SetGorm
+	nsqite.SetGorm(db)
 
+	const topic = "a-book"
+	p := NewProducer[string]()
+	// 限制任务失败重试次数 10 次
+	c := NewConsumer(topic, "comsumer1")
+	c.AddConcurrentHandlers(&Reader1{}, 5)
 	for i := 0; i < 5; i++ {
-		// This function returns an error, but in normal pub/sub usage, errors are rare and can be ignored
+		// 此函数会返回 err，正常使用发布订阅不会出错，可以直接丢弃 err 不处理
 		p.Publish(topic, fmt.Sprintf("a >> hello %d", i))
 	}
 

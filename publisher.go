@@ -29,7 +29,7 @@ func (p *Publisher[T]) Publish(topic string, msg T) error {
 	})
 }
 
-// PublishWithContext 发布消息
+// PublishWithContext 发布限时消息
 // 如果需要限制发布超时，请使用此函数，可以根据返回的 err 判断是否发布超时
 func (p *Publisher[T]) PublishWithContext(ctx context.Context, topic string, msg T) error {
 	return eventBus.Publish(ctx, topic, &EventMessage[T]{

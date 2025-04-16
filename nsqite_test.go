@@ -1,159 +1,109 @@
 package nsqite
 
 import (
-	"context"
+	"fmt"
+	"log/slog"
+	"os"
+	"sync/atomic"
 	"testing"
 	"time"
 
-	"github.com/ixugo/nsqite/storage/memory"
+	"github.com/glebarez/sqlite"
+	"gorm.io/gorm"
 )
 
+func cleanUp() {
+	os.Remove("test.db")
+}
+
+func initDB() {
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
+		Level:     slog.LevelDebug,
+		AddSource: true,
+	})))
+
+	// :memory:?_journal=WAL&_timeout=5000&_fk=true
+	gormDB, err := gorm.Open(sqlite.Open("test.db"), &gorm.Config{})
+	if err != nil {
+		panic(err)
+	}
+	db, err := gormDB.DB()
+	if err != nil {
+		panic(err)
+	}
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+
+	SetGorm(gormDB)
+}
+
+// TestNSQite 测试消费消息
 func TestNSQite(t *testing.T) {
-	// 创建内存存储
-	store := memory.NewMemoryStorage()
-	if err := store.Init(nil); err != nil {
-		t.Fatalf("初始化存储失败: %v", err)
-	}
+	cleanUp()
+	initDB()
 
-	// 创建NSQite实例
-	nsqite, err := New(store)
-	if err != nil {
-		t.Fatalf("创建NSQite实例失败: %v", err)
-	}
-	defer nsqite.Close()
+	const topic = "test"
+	const messageBody = "hello world"
 
-	// 测试创建Topic
-	topic, err := nsqite.GetTopic("test-topic")
-	if err != nil {
-		t.Fatalf("创建Topic失败: %v", err)
-	}
-	if topic.Name != "test-topic" {
-		t.Errorf("期望topic名称为 'test-topic'，实际为 '%s'", topic.Name)
-	}
+	// 2. 创建生产者和消费者
+	p := NewProducer()
+	c := NewConsumer(topic, "test-channel")
 
-	// 测试创建Channel
-	channel, err := nsqite.CreateChannel("test-topic", "test-channel")
-	if err != nil {
-		t.Fatalf("创建Channel失败: %v", err)
-	}
-	if channel.Name != "test-channel" {
-		t.Errorf("期望channel名称为 'test-channel'，实际为 '%s'", channel.Name)
-	}
-
-	// 测试发布消息
-	if err := nsqite.Publish("test-topic", []byte("test message")); err != nil {
-		t.Fatalf("发布消息失败: %v", err)
-	}
-
-	// 测试订阅消息
-	msgChan, err := nsqite.Subscribe("test-topic", "test-channel")
-	if err != nil {
-		t.Fatalf("订阅消息失败: %v", err)
-	}
-
-	// 接收消息
-	select {
-	case msg := <-msgChan:
-		if string(msg.Body) != "test message" {
-			t.Errorf("期望消息内容为 'test message'，实际为 '%s'", string(msg.Body))
+	// 3. 设置消息处理函数
+	done := make(chan bool)
+	c.AddConcurrentHandlers(func(msg *Message) error {
+		if string(msg.Body) != messageBody {
+			t.Errorf("expected message body %s, got %s", messageBody, string(msg.Body))
 		}
-	case <-time.After(time.Second):
-		t.Fatal("接收消息超时")
+		done <- true
+		return nil
+	}, 1)
+
+	// 4. 发布消息
+	if err := p.Publish(topic, []byte(messageBody)); err != nil {
+		t.Fatal(err)
 	}
+
+	// 5. 等待消息处理完成
+	select {
+	case <-done:
+		// 测试通过
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout waiting for message processing")
+	}
+
+	time.Sleep(time.Second)
 }
 
-func TestNSQiteWithContext(t *testing.T) {
-	// 创建内存存储
-	store := memory.NewMemoryStorage()
-	if err := store.Init(nil); err != nil {
-		t.Fatalf("初始化存储失败: %v", err)
+// TestMaxAttempts 测试最大重试次数
+func TestMaxAttempts(t *testing.T) {
+	cleanUp()
+	initDB()
+	const topic = "test-max-attempts"
+	const messageBody = "test message"
+
+	p := NewProducer()
+	c := NewConsumer(topic, "test-channel", WithConsumerMaxAttempts(3))
+
+	attempts := uint32(0)
+	c.AddConcurrentHandlers(func(msg *Message) error {
+		msg.DisableAutoResponse()
+
+		atomic.AddUint32(&attempts, 1)
+
+		msg.Requeue(0)
+
+		return fmt.Errorf("simulated error")
+	}, 1)
+
+	if err := p.Publish(topic, []byte(messageBody)); err != nil {
+		t.Fatal(err)
 	}
 
-	// 创建NSQite实例
-	nsqite, err := New(store)
-	if err != nil {
-		t.Fatalf("创建NSQite实例失败: %v", err)
-	}
-	defer nsqite.Close()
+	c.WaitMessage()
+	time.Sleep(time.Second)
 
-	// 创建上下文
-	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
-	defer cancel()
-
-	// 测试带上下文的发布
-	if err := nsqite.PublishWithContext(ctx, "test-topic", []byte("test message")); err != nil {
-		t.Fatalf("发布消息失败: %v", err)
-	}
-
-	// 测试带上下文的订阅
-	msgChan, err := nsqite.Subscribe("test-topic", "test-channel")
-	if err != nil {
-		t.Fatalf("订阅消息失败: %v", err)
-	}
-
-	// 接收消息
-	select {
-	case msg := <-msgChan:
-		if string(msg.Body) != "test message" {
-			t.Errorf("期望消息内容为 'test message'，实际为 '%s'", string(msg.Body))
-		}
-	case <-time.After(time.Second):
-		t.Fatal("接收消息超时")
-	}
-}
-
-func TestNSQiteMessageTimeout(t *testing.T) {
-	// 创建内存存储
-	store := memory.NewMemoryStorage()
-	if err := store.Init(nil); err != nil {
-		t.Fatalf("初始化存储失败: %v", err)
-	}
-
-	// 创建NSQite实例
-	nsqite, err := New(store)
-	if err != nil {
-		t.Fatalf("创建NSQite实例失败: %v", err)
-	}
-	defer nsqite.Close()
-
-	// 创建Topic和Channel
-	_, err = nsqite.CreateChannel("test-topic", "test-channel")
-	if err != nil {
-		t.Fatalf("创建Channel失败: %v", err)
-	}
-
-	// 发布消息
-	if err := nsqite.Publish("test-topic", []byte("test message")); err != nil {
-		t.Fatalf("发布消息失败: %v", err)
-	}
-
-	// 订阅消息
-	msgChan, err := nsqite.Subscribe("test-topic", "test-channel")
-	if err != nil {
-		t.Fatalf("订阅消息失败: %v", err)
-	}
-
-	// 接收消息
-	var msg *Message
-	select {
-	case msg = <-msgChan:
-		if string(msg.Body) != "test message" {
-			t.Errorf("期望消息内容为 'test message'，实际为 '%s'", string(msg.Body))
-		}
-	case <-time.After(time.Second):
-		t.Fatal("接收消息超时")
-	}
-
-	// 等待消息超时
-	time.Sleep(2 * time.Second)
-
-	// 消息应该被重新入队
-	select {
-	case msg = <-msgChan:
-		if string(msg.Body) != "test message" {
-			t.Errorf("期望消息内容为 'test message'，实际为 '%s'", string(msg.Body))
-		}
-	case <-time.After(time.Second):
-		t.Fatal("接收重试消息超时")
+	if attempts != 3 {
+		t.Errorf("expected 3 attempts, got %d", attempts)
 	}
 }

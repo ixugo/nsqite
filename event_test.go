@@ -148,7 +148,7 @@ func TestDisableAutoResponse(t *testing.T) {
 
 func TestMaxAttemptsLimit(t *testing.T) {
 	topic := "max-attempts-test"
-	const maxAttempts = 2
+	const maxAttempts = 5
 
 	// 创建一个计数器来跟踪消息处理的尝试次数
 	type attemptTracker struct {
