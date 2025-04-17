@@ -13,14 +13,18 @@ type SubscriberInfo interface {
 	SendMessage(ctx context.Context, msg interface{}) error
 }
 
-var eventBus = NewEventBus()
+type cloner interface {
+	Clone() cloner
+}
+
+var eventBus = newEventBus()
 
 type EventBus struct {
 	subscribers map[string]map[string]SubscriberInfo
 	m           sync.RWMutex
 }
 
-func NewEventBus() *EventBus {
+func newEventBus() *EventBus {
 	return &EventBus{
 		subscribers: make(map[string]map[string]SubscriberInfo),
 	}
@@ -51,7 +55,7 @@ func (s *EventBus) DelConsumer(c SubscriberInfo) {
 	delete(s.subscribers[topic], channel)
 }
 
-func (s *EventBus) Publish(ctx context.Context, topic string, msg interface{}) error {
+func (s *EventBus) Publish(ctx context.Context, topic string, msg cloner) error {
 	s.m.RLock()
 	subs, ok := s.subscribers[topic]
 	s.m.RUnlock()
@@ -59,8 +63,14 @@ func (s *EventBus) Publish(ctx context.Context, topic string, msg interface{}) e
 		return fmt.Errorf("topic %s need subscribers", topic)
 	}
 
+	var i int
 	for _, c := range subs {
-		if err := c.SendMessage(ctx, msg); err != nil {
+		i++
+		m := msg
+		if i > 1 {
+			m = msg.Clone()
+		}
+		if err := c.SendMessage(ctx, m); err != nil {
 			return err
 		}
 	}

@@ -26,7 +26,7 @@ var once sync.Once
 
 func TransactionMQ() *NSQite {
 	once.Do(func() {
-		transactionMQ = New(DB())
+		transactionMQ = new(gormDB())
 	})
 	return transactionMQ
 }
@@ -41,8 +41,8 @@ type NSQite struct {
 	once sync.Once
 }
 
-// New 创建一个新的NSQite实例
-func New(db *gorm.DB) *NSQite {
+// new 创建一个新的NSQite实例
+func new(db *gorm.DB) *NSQite {
 	nsqite := &NSQite{
 		db:        db,
 		exit:      make(chan struct{}),
@@ -101,8 +101,17 @@ func (n *NSQite) Publish(topic string, msg *Message) error {
 	if err := n.PublishTx(n.db, topic, msg); err != nil {
 		return err
 	}
+
+	var i int
 	for _, c := range consumers {
-		if err := c.SendMessage(msg); err != nil {
+		i++
+		m := msg
+		if i > 1 {
+			mm := *msg
+			m = &mm
+		}
+
+		if err := c.SendMessage(m); err != nil {
 			return err
 		}
 	}
@@ -147,6 +156,12 @@ func (n *NSQite) messagePump() {
 			return
 		case <-cleanUpTimer.C:
 			cleanUpTimer.Reset(GetTimeUntilMidnight())
+			now := time.Now()
+
+			if err := n.db.Table(msg.TableName()).Where("timestamp < ?", now.AddDate(0, 0, -15)).Delete(nil).Error; err != nil {
+				slog.Error("messagePump", "error", err)
+			}
+
 			if err := n.db.Table(msg.TableName()).Where("responded >= consumers").Count(&count).Error; err != nil {
 				slog.Error("messagePump", "error", err)
 				continue
@@ -155,7 +170,7 @@ func (n *NSQite) messagePump() {
 			if count > DefaultMaxMessageRows {
 				days = 3
 			}
-			if err := n.db.Table(msg.TableName()).Where("responded >= consumers AND timestamp < ?", time.Now().AddDate(0, 0, -days)).Delete(nil).Error; err != nil {
+			if err := n.db.Table(msg.TableName()).Where("responded >= consumers AND timestamp < ?", now.AddDate(0, 0, -days)).Delete(nil).Error; err != nil {
 				slog.Error("messagePump", "error", err)
 				continue
 			}
@@ -170,12 +185,15 @@ func (n *NSQite) messagePump() {
 				id = msgs[len(msgs)-1].ID
 			}
 
-			for _, m := range msgs {
-				consumers := n.consumer(m.Topic)
-				chs := strings.Split(m.RespondedChannels, ",")
+			for _, msg := range msgs {
+				consumers := n.consumer(msg.Topic)
+				chs := strings.Split(msg.RespondedChannels, ",")
+
 				for _, c := range consumers {
 					if !slices.Contains(chs, c.channel) {
-						c.sendMessage(&m)
+						// TODO: 若发送阻塞，会导致整个消息泵阻塞
+						// 可以增加延迟队列，将发送失败的消息，放到延迟队列里重试，优先处理未阻塞的消费者
+						_ = c.sendMessage(msg)
 					}
 				}
 			}

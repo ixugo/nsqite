@@ -13,7 +13,7 @@ func SetGorm(g *gorm.DB) {
 	db = g
 }
 
-func DB() *gorm.DB {
+func gormDB() *gorm.DB {
 	if db == nil {
 		panic("please use nsqite.SetGorm() to set db")
 	}

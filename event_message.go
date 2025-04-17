@@ -76,3 +76,8 @@ func (m *EventMessage[T]) Touch() {
 	}
 	m.Delegate.OnTouch(m)
 }
+
+func (m *EventMessage[T]) Clone() cloner {
+	clone := *m
+	return &clone
+}

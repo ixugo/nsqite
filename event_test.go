@@ -131,7 +131,7 @@ func (r *Reader3) HandleMessage(message *EventMessage[string]) error {
 func TestDisableAutoResponse(t *testing.T) {
 	topic := "test-topic"
 	publisher := NewPublisher[string]()
-	subscriber := NewSubscriber(topic, "test-subscriber", WithMaxAttempts[string](5))
+	subscriber := NewSubscriber[string](topic, "test-subscriber", WithMaxAttempts(5))
 	reader3 := &Reader3{}
 	subscriber.AddConcurrentHandlers(reader3, 1)
 
@@ -160,10 +160,10 @@ func TestMaxAttemptsLimit(t *testing.T) {
 
 	// 创建发布者和订阅者
 	publisher := NewPublisher[string]()
-	subscriber := NewSubscriber(topic, "max-attempts-consumer", WithMaxAttempts[string](maxAttempts))
+	subscriber := NewSubscriber[string](topic, "max-attempts-consumer", WithMaxAttempts(maxAttempts))
 
 	// 创建一个总是返回错误的处理器，强制消息重试
-	handler := EventHandler[string](HandlerFunc[string](func(message *EventMessage[string]) error {
+	handler := EventHandler[string](SubscriberHandlerFunc[string](func(message *EventMessage[string]) error {
 		atomic.AddInt32(&tracker.attempts, 1)
 		return errors.New("强制失败以触发重试")
 	}))
@@ -186,14 +186,6 @@ func TestMaxAttemptsLimit(t *testing.T) {
 	if attempts != maxAttempts {
 		t.Errorf("消息尝试次数不符合预期: 期望 %d 次，实际 %d 次", maxAttempts, attempts)
 	}
-}
-
-// HandlerFunc 是一个适配器，允许使用普通函数作为 EventHandler
-type HandlerFunc[T any] func(message *EventMessage[T]) error
-
-// HandleMessage 调用 f(m)
-func (f HandlerFunc[T]) HandleMessage(m *EventMessage[T]) error {
-	return f(m)
 }
 
 // 测试并发发布和订阅
@@ -293,11 +285,11 @@ func TestPublishTimeout(t *testing.T) {
 
 	// 创建发布者和订阅者
 	p := NewPublisher[string]()
-	s := NewSubscriber(topic, "timeout-consumer", WithQueueSize[string](1))
+	s := NewSubscriber[string](topic, "timeout-consumer", WithQueueSize(1))
 
 	// 创建一个处理消息很慢的处理器
 	cache := make(map[string]struct{})
-	s.AddConcurrentHandlers(HandlerFunc[string](func(message *EventMessage[string]) error {
+	s.AddConcurrentHandlers(SubscriberHandlerFunc[string](func(message *EventMessage[string]) error {
 		time.Sleep(1 * time.Second)
 		cache[message.Body] = struct{}{}
 		return nil

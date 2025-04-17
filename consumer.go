@@ -35,27 +35,29 @@ type Consumer struct {
 }
 
 // MessageHandler 定义消息处理函数类型
-type MessageHandler func(msg *Message) error
+type MessageHandler interface {
+	HandleMessage(msg *Message) error
+}
 
-type ConsumerOption func(*Consumer)
+type consumerOption func(*Consumer)
 
 // WithQueueSize 设置消息队列大小
 // WithQueueSize(0) 表示无缓冲队列
-func WithConsumerQueueSize(size uint16) ConsumerOption {
+func WithConsumerQueueSize(size uint16) consumerOption {
 	return func(c *Consumer) {
 		c.queueSize = size
 	}
 }
 
 // WithMaxAttempts 设置消息最大重试次数，其次数是最终回调函数执行次数
-func WithConsumerMaxAttempts(maxAttempts uint32) ConsumerOption {
+func WithConsumerMaxAttempts(maxAttempts uint32) consumerOption {
 	return func(c *Consumer) {
 		c.MaxAttempts = maxAttempts
 	}
 }
 
 // NewConsumer 创建一个新的Consumer
-func NewConsumer(topic, channel string, opts ...ConsumerOption) *Consumer {
+func NewConsumer(topic, channel string, opts ...consumerOption) *Consumer {
 	c := Consumer{
 		topic:               topic,
 		channel:             channel,
@@ -114,7 +116,7 @@ func (c *Consumer) handlerLoop(handler MessageHandler) {
 		}
 
 		atomic.AddInt32(&c.pendingMessages, 1)
-		err := handler(msg)
+		err := handler.HandleMessage(msg)
 		atomic.AddInt32(&c.pendingMessages, -1)
 		if err != nil {
 			if !msg.IsAutoResponseDisabled() {
@@ -167,7 +169,7 @@ func (c *Consumer) backendLoop() {
 	}
 }
 
-func (c *Consumer) sendMessage(msg *Message) error {
+func (c *Consumer) sendMessage(msg Message) error {
 	c.incomingMutex.Lock()
 	_, ok := c.incomingMessagesMap[msg.ID]
 	if ok {
@@ -176,7 +178,7 @@ func (c *Consumer) sendMessage(msg *Message) error {
 	}
 	c.incomingMessagesMap[msg.ID] = struct{}{}
 	c.incomingMutex.Unlock()
-	return c.SendMessage(msg)
+	return c.SendMessage(&msg)
 }
 
 func (c *Consumer) SendMessage(msg *Message) error {
@@ -249,4 +251,11 @@ func (c *Consumer) Stop() {
 		close(c.exit)
 		close(c.incomingMessages)
 	})
+}
+
+// ConsumerHandler 提供一个默认的 MessageHandler 实现，放入函数即可
+type ConsumerHandlerFunc func(msg *Message) error
+
+func (h ConsumerHandlerFunc) HandleMessage(msg *Message) error {
+	return h(msg)
 }

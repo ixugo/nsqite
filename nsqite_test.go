@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"os"
 	"runtime"
+	"runtime/pprof"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -55,13 +56,13 @@ func TestNSQite(t *testing.T) {
 
 	// 3. 设置消息处理函数
 	done := make(chan bool)
-	c.AddConcurrentHandlers(func(msg *Message) error {
+	c.AddConcurrentHandlers(ConsumerHandlerFunc(func(msg *Message) error {
 		if string(msg.Body) != messageBody {
 			t.Errorf("expected message body %s, got %s", messageBody, string(msg.Body))
 		}
 		done <- true
 		return nil
-	}, 1)
+	}), 1)
 
 	// 4. 发布消息
 	if err := p.Publish(topic, []byte(messageBody)); err != nil {
@@ -89,15 +90,12 @@ func TestMaxAttempts(t *testing.T) {
 	c := NewConsumer(topic, "test-channel", WithConsumerMaxAttempts(3))
 
 	attempts := uint32(0)
-	c.AddConcurrentHandlers(func(msg *Message) error {
+	c.AddConcurrentHandlers(ConsumerHandlerFunc(func(msg *Message) error {
 		msg.DisableAutoResponse()
-
 		atomic.AddUint32(&attempts, 1)
-
 		msg.Requeue(0)
-
 		return fmt.Errorf("simulated error")
-	}, 1)
+	}), 1)
 
 	if err := p.Publish(topic, []byte(messageBody)); err != nil {
 		t.Fatal(err)
@@ -119,7 +117,8 @@ func BenchmarkNSQite(b *testing.B) {
 	const messageBody = "test message"
 
 	p := NewProducer()
-	c := NewConsumer(topic, "benchmark-channel", WithConsumerQueueSize(1024))
+	c := NewConsumer(topic, "benchmark-channel")
+	c2 := NewConsumer(topic, "benchmark-channel2")
 
 	// 计数器和完成信号
 	var counter int32
@@ -127,14 +126,16 @@ func BenchmarkNSQite(b *testing.B) {
 	var once sync.Once
 
 	// 添加消息处理器
-	c.AddConcurrentHandlers(func(msg *Message) error {
+	c.AddConcurrentHandlers(ConsumerHandlerFunc(func(msg *Message) error {
 		if atomic.AddInt32(&counter, 1) >= int32(b.N) {
 			once.Do(func() {
 				close(done)
 			})
 		}
 		return nil
-	}, int32(runtime.NumCPU()))
+	}), int32(runtime.NumCPU()))
+
+	c2.AddConcurrentHandlers(ConsumerHandlerFunc(func(msg *Message) error { return nil }), int32(runtime.NumCPU()))
 
 	b.ResetTimer() // 重置计时器，不计算初始化时间
 
@@ -156,4 +157,15 @@ func BenchmarkNSQite(b *testing.B) {
 
 	// 输出统计信息
 	b.ReportMetric(float64(b.N)/b.Elapsed().Seconds(), "msgs/sec")
+
+	// 导出内存 pprof
+	f, err := os.Create("mem.pprof")
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer f.Close()
+	runtime.GC() // 执行一次 GC
+	if err := pprof.WriteHeapProfile(f); err != nil {
+		b.Fatal(err)
+	}
 }

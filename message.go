@@ -39,10 +39,6 @@ type MessageDelegate interface {
 	OnTouch(message *Message)
 }
 
-type Handler interface {
-	HandleMessage(message *Message) error
-}
-
 // Finish 消息处理完成
 func (m *Message) Finish() {
 	if !atomic.CompareAndSwapInt32(&m.responded, 0, 1) {

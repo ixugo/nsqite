@@ -13,7 +13,7 @@ func BenchmarkPublish(b *testing.B) {
 
 	done := make(chan struct{})
 	var receivedCount int64
-	c.AddConcurrentHandlers(HandlerFunc[string](func(message *EventMessage[string]) error {
+	c.AddConcurrentHandlers(SubscriberHandlerFunc[string](func(message *EventMessage[string]) error {
 		if atomic.AddInt64(&receivedCount, 1) == int64(b.N) {
 			close(done)
 		}

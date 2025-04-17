@@ -99,7 +99,7 @@ func (r *Reader3) HandleMessage(message *EventMessage[string]) error {
 }
 ```
 
-### Transactional Messages (In Development)
+### Transactional Messages
 
 Database-based implementation, supporting GORM, with transactional message publishing, consisting of producers and consumers.
 
@@ -203,3 +203,32 @@ One producer, one consumer, based on SQLite database, performance is barely sati
 
 - Event Bus support for Redis as persistent storage, enabling distributed deployment
 - Transactional Message Queue support for distributed deployment, where consumers update the database after receiving messages
+
+## QA
+
+**What happens when subscriber b blocks among subscribers a, b, and c?**
+- a receives messages normally
+- b blocks, causing c to not receive messages
+- b blocks, causing the publisher to block
+
+Solutions:
+- Use `WithDiscardOnBlocking(true)` to discard messages
+- Use `PublicWithContext(ctx, topic, message)` to limit publishing timeout
+- Use `WithQueueSize(1024)` to set cache queue length
+- Optimize callbacks to make consumers process tasks faster
+
+**When using transactional messages, if messages are published and a, c have completed tasks, what happens when the service restarts with b not completed?**
+- After service restart, b will receive the message again and continue processing
+- a and c won't receive the message again as they have already completed
+
+**Can I customize the delay time when a task fails?**
+- Yes, see the [example](./example/bus_delay/main.go)
+
+**What happens when a task keeps failing and reaches the maximum retry count?**
+A task ends under two conditions:
+- Task execution succeeds
+- Task reaches maximum execution count
+For unlimited retries, use `WithMaxAttempts(0)`. By default, it retries 10 times, but you can increase it with `WithMaxAttempts(100)`
+
+**If `WithMaxAttempts(10)` means 10 retries, how many times will the callback be executed if it keeps failing?**
+- 10 times
