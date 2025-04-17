@@ -163,8 +163,8 @@ func (s *Subscriber[T]) handlerLoop(handler EventHandler[T]) {
 		if err != nil {
 			if !msg.IsAutoResponseDisabled() {
 				// 允许脏读，因为其长度准确性不重要
-				l := s.deferredPQ.Len()
-				msg.Requeue(time.Second + time.Duration(l)*10*time.Millisecond)
+				l := s.deferredPQ.Len() + 1
+				msg.Requeue(time.Second + time.Duration(msg.Attempts)*200*time.Millisecond + time.Duration(l)*10*time.Millisecond)
 			}
 			continue
 		}
