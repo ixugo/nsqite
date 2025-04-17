@@ -59,17 +59,17 @@ func (r *Reader1) HandleMessage(message *EventMessage[string]) error {
 
 // 模拟一个作者疯狂写书，出版社派出 5 个编辑，每个编辑每秒只能处理一本书
 func main() {
-	const topic = "a-book"
-	p := NewPublisher[string]()
-	// 限制任务失败重试次数 10 次
-	c := NewSubscriber(topic, "comsumer1", WithMaxAttempts[string](10))
-	c.AddConcurrentHandlers(&Reader1{}, 5)
+	// 1. SetGorm
+	nsqite.SetGorm(db)
 
+	const topic = "a-book"
+	p := NewProducer[string]()
+	// 限制任务失败重试次数 10 次
+	c := NewConsumer(topic, "comsumer1", WithMaxAttempts(10))
+	c.AddConcurrentHandlers(&Reader1{}, 5)
 	for i := 0; i < 5; i++ {
-		// 此函数会返回 err，正常使用发布订阅不会出错，可以直接丢弃 err 不处理
 		p.Publish(topic, fmt.Sprintf("a >> hello %d", i))
 	}
-
 	time.Sleep(2 * time.Second)
 }
 
@@ -140,7 +140,7 @@ func main() {
 	const topic = "a-book"
 	p := NewProducer[string]()
 	// 限制任务失败重试次数 10 次
-	c := NewConsumer(topic, "comsumer1")
+	c := NewConsumer(topic, "comsumer1", WithMaxAttempts(10))
 	c.AddConcurrentHandlers(&Reader1{}, 5)
 	for i := 0; i < 5; i++ {
 		p.Publish(topic, fmt.Sprintf("a >> hello %d", i))
@@ -214,3 +214,10 @@ NSQite 使用 slog 记录日志，如果出现以下警告日志，需要及时�
 - 当表数据超过 1 万条时，自动删除 3 天前的**已完成**消息
 
 需要自定义时间? 请提 pr 或 issus。
+
+**在事件总线中，回调一直失败会阻塞队列吗?**
+- 不会，会进入优先队列中，延迟处理
+- 大量任务失败，会导致消息堆积在内存中，达到最大尝试次数时释放
+
+**在事件总线中，发布的某个主题阻塞了，会影响其它主题发布吗?**
+- 不会，主题之间互不影响

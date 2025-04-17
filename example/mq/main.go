@@ -20,8 +20,8 @@ func main() {
 	nsqite.SetGorm(db)
 
 	p := nsqite.NewProducer()
-	c := nsqite.NewConsumer(topic, "ch", nsqite.WithConsumerMaxAttempts(10))
-	c2 := nsqite.NewConsumer(topic, "ch2", nsqite.WithConsumerMaxAttempts(3))
+	c := nsqite.NewConsumer(topic, "ch", nsqite.WithMaxAttempts(10))
+	c2 := nsqite.NewConsumer(topic, "ch2", nsqite.WithMaxAttempts(3))
 
 	var i int
 

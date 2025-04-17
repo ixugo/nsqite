@@ -3,9 +3,7 @@ package nsqite
 import (
 	"fmt"
 	"log/slog"
-	"os"
 	"runtime"
-	"runtime/pprof"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -15,10 +13,6 @@ import (
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
 )
-
-func cleanUp() {
-	_ = os.Remove("test.db")
-}
 
 func initDB() {
 	// slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
@@ -87,7 +81,7 @@ func TestMaxAttempts(t *testing.T) {
 	const messageBody = "test message"
 
 	p := NewProducer()
-	c := NewConsumer(topic, "test-channel", WithConsumerMaxAttempts(3))
+	c := NewConsumer(topic, "test-channel", WithMaxAttempts(3))
 
 	attempts := uint32(0)
 	c.AddConcurrentHandlers(ConsumerHandlerFunc(func(msg *Message) error {
@@ -157,15 +151,4 @@ func BenchmarkNSQite(b *testing.B) {
 
 	// 输出统计信息
 	b.ReportMetric(float64(b.N)/b.Elapsed().Seconds(), "msgs/sec")
-
-	// 导出内存 pprof
-	f, err := os.Create("mem.pprof")
-	if err != nil {
-		b.Fatal(err)
-	}
-	defer f.Close()
-	runtime.GC() // 执行一次 GC
-	if err := pprof.WriteHeapProfile(f); err != nil {
-		b.Fatal(err)
-	}
 }

@@ -26,7 +26,7 @@ var once sync.Once
 
 func TransactionMQ() *NSQite {
 	once.Do(func() {
-		transactionMQ = new(gormDB())
+		transactionMQ = newNSQite(gormDB())
 	})
 	return transactionMQ
 }
@@ -41,16 +41,18 @@ type NSQite struct {
 	once sync.Once
 }
 
-// new 创建一个新的NSQite实例
-func new(db *gorm.DB) *NSQite {
+// newNSQite 创建一个新的NSQite实例
+func newNSQite(db *gorm.DB) *NSQite {
 	nsqite := &NSQite{
 		db:        db,
 		exit:      make(chan struct{}),
 		consumers: make(map[string]map[string]*Consumer),
 	}
-	nsqite.db.AutoMigrate(
+	if err := nsqite.db.AutoMigrate(
 		&Message{},
-	)
+	); err != nil {
+		panic(err)
+	}
 	// 启动消息泵
 	go nsqite.messagePump()
 	return nsqite
@@ -81,7 +83,7 @@ func (n *NSQite) PublishTx(tx *gorm.DB, topic string, msg *Message) error {
 	for _, consumer := range c {
 		chs = append(chs, consumer.channel)
 	}
-	msg.Consumers = uint32(len(chs))
+	msg.Consumers = uint32(len(chs)) //nolint
 	msg.Channels = strings.Join(chs, ",")
 	if err := tx.Create(msg).Error; err != nil {
 		return err

@@ -12,6 +12,7 @@ import (
 
 // Consumer 表示一个消息消费者
 type Consumer struct {
+	*BaseConfig
 	topic, channel      string
 	incomingMessages    chan *Message
 	incomingMessagesMap map[int]struct{}
@@ -19,12 +20,8 @@ type Consumer struct {
 
 	backendMessage chan *Message
 
-	queueSize uint16
-
 	stopHandler     sync.Once
 	runningHandlers int32
-
-	MaxAttempts uint32
 
 	pendingMessages int32
 
@@ -39,36 +36,18 @@ type MessageHandler interface {
 	HandleMessage(msg *Message) error
 }
 
-type consumerOption func(*Consumer)
-
-// WithQueueSize 设置消息队列大小
-// WithQueueSize(0) 表示无缓冲队列
-func WithConsumerQueueSize(size uint16) consumerOption {
-	return func(c *Consumer) {
-		c.queueSize = size
-	}
-}
-
-// WithMaxAttempts 设置消息最大重试次数，其次数是最终回调函数执行次数
-func WithConsumerMaxAttempts(maxAttempts uint32) consumerOption {
-	return func(c *Consumer) {
-		c.MaxAttempts = maxAttempts
-	}
-}
-
 // NewConsumer 创建一个新的Consumer
-func NewConsumer(topic, channel string, opts ...consumerOption) *Consumer {
+func NewConsumer(topic, channel string, opts ...Option) *Consumer {
 	c := Consumer{
 		topic:               topic,
 		channel:             channel,
-		MaxAttempts:         10,
-		queueSize:           128,
 		deferredPQ:          pqueue.New(8),
 		exit:                make(chan struct{}),
 		incomingMessagesMap: make(map[int]struct{}),
+		BaseConfig:          newBaseConfig(),
 	}
 	for _, opt := range opts {
-		opt(&c)
+		opt(c.BaseConfig)
 	}
 	c.incomingMessages = make(chan *Message, c.queueSize)
 	c.backendMessage = make(chan *Message, c.queueSize/4+1)
@@ -109,8 +88,8 @@ func (c *Consumer) handlerLoop(handler MessageHandler) {
 			return
 		}
 
-		attempts := atomic.AddUint32(&msg.Attempts, 1)
-		if c.shouldFailMessage(attempts) {
+		atomic.AddUint32(&msg.Attempts, 1)
+		if c.shouldFailMessage(msg) {
 			msg.Finish()
 			continue
 		}
@@ -136,9 +115,9 @@ func (c *Consumer) log() *slog.Logger {
 	return slog.Default().With("topic", c.topic, "channel", c.channel)
 }
 
-func (c *Consumer) shouldFailMessage(attempts uint32) bool {
-	if c.MaxAttempts > 0 && attempts > c.MaxAttempts {
-		c.log().Warn("[NSQite] message attempts limit reached", "attempts", attempts)
+func (c *Consumer) shouldFailMessage(msg *Message) bool {
+	if c.maxAttempts > 0 && msg.Attempts > c.maxAttempts {
+		c.log().Warn("[NSQite] message attempts limit reached", "attempts", msg.Attempts, "id", msg.ID)
 		return true
 	}
 	return false
@@ -183,8 +162,23 @@ func (c *Consumer) sendMessage(msg Message) error {
 
 func (c *Consumer) SendMessage(msg *Message) error {
 	msg.Delegate = c
-	c.incomingMessages <- msg
-	return nil
+
+	var recordedLog bool
+	timer := getTimer(c.checkTimeout)
+	defer putTimer(timer)
+	for {
+		select {
+		case c.incomingMessages <- msg:
+			return nil
+		case <-timer.C:
+			// 避免重复打印日志
+			if !recordedLog {
+				c.log().Warn("[NSQite] publish message timeout", "msgID", msg.ID, "queueSize", len(c.incomingMessages))
+				recordedLog = true
+			}
+			continue
+		}
+	}
 }
 
 // OnFinish implements MessageDelegate.
@@ -205,7 +199,7 @@ func (c *Consumer) OnRequeue(m *Message, delay time.Duration) {
 	c.log().Debug("[NSQite] message requeue", "msgID", m.ID, "delay", delay, "attempts", m.Attempts)
 
 	if delay <= 0 {
-		c.SendMessage(m)
+		_ = c.SendMessage(m)
 		return
 	}
 	c.StartDeferredTimeout(m, delay)

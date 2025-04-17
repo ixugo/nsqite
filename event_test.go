@@ -326,3 +326,154 @@ func TestPublishTimeout(t *testing.T) {
 		t.Error("成功消息未被接收")
 	}
 }
+
+// 测试发布者在订阅者队列满且返回错误时的行为
+// 队列不会阻塞
+func TestPublishWithQueueLimitAndError(t *testing.T) {
+	t.Parallel()
+	const topic = "queue-limit-test"
+
+	// 创建发布者和两个订阅者，限制队列长度为2
+	p := NewPublisher[string]()
+	s1 := NewSubscriber[string](topic, "limit-consumer-1", WithQueueSize(2))
+	s2 := NewSubscriber[string](topic, "limit-consumer-2", WithQueueSize(2))
+
+	// 计数器
+	var count1, count2 int32
+
+	// 第一个订阅者：处理到第3条消息时返回错误
+	s1.AddConcurrentHandlers(SubscriberHandlerFunc[string](func(message *EventMessage[string]) error {
+		atomic.AddInt32(&count1, 1)
+		return errors.New("故意返回错误")
+	}), 1)
+
+	// 第二个订阅者：处理到第3条消息时返回错误
+	s2.AddConcurrentHandlers(SubscriberHandlerFunc[string](func(message *EventMessage[string]) error {
+		atomic.AddInt32(&count2, 1)
+		return errors.New("故意返回错误")
+	}), 1)
+
+	// 尝试发布10条消息
+	var publishCount int
+	for i := 0; i < 10; i++ {
+		msg := fmt.Sprintf("message-%d", i)
+		err := p.Publish(topic, msg)
+		if err == nil {
+			publishCount++
+		}
+	}
+
+	// 等待消息处理完成
+	s1.WaitMessage()
+	s2.WaitMessage()
+
+	// 验证结果
+	t.Logf("成功发布消息数: %d", publishCount)
+	t.Logf("订阅者1处理消息数: %d", atomic.LoadInt32(&count1))
+	t.Logf("订阅者2处理消息数: %d", atomic.LoadInt32(&count2))
+
+	// 由于队列限制为2，加上正在处理的1条，理论上每个订阅者最多能接收3条消息
+	if publishCount != 10 {
+		t.Errorf("预期最多发布 10 条消息，但实际发布了%d条", publishCount)
+	}
+}
+
+// TestConcurrentPublishSubscribe2 测试 a 阻塞了，b 会阻塞吗?
+// 结论，不会
+func TestConcurrentPublishSubscribe2(t *testing.T) {
+	// 创建两个通道用于等待两个协程完成
+	done1 := make(chan struct{})
+	done2 := make(chan struct{})
+
+	// 第一个协程：发布者和订阅者受阻
+	go func() {
+		defer close(done1)
+
+		const topic = "test-topic-blocked"
+
+		// 创建发布者和两个订阅者
+		p := NewPublisher[string]()
+		s1 := NewSubscriber[string](topic, "consumer1", WithQueueSize(2))
+		s2 := NewSubscriber[string](topic, "consumer2", WithQueueSize(2))
+
+		// 第一个订阅者：处理到第3条消息时返回错误
+		s1.AddConcurrentHandlers(SubscriberHandlerFunc[string](func(message *EventMessage[string]) error {
+			time.Sleep(20 * time.Second)
+			return errors.New("故意返回错误")
+		}), 1)
+
+		// 第二个订阅者：处理到第3条消息时返回错误
+		s2.AddConcurrentHandlers(SubscriberHandlerFunc[string](func(message *EventMessage[string]) error {
+			time.Sleep(20 * time.Second)
+			return errors.New("故意返回错误")
+		}), 1)
+
+		// 尝试发布10条消息
+		var publishCount int
+		for i := 0; i < 10; i++ {
+			msg := fmt.Sprintf("blocked-message-%d", i)
+			err := p.Publish(topic, msg)
+			if err == nil {
+				publishCount++
+			}
+		}
+
+		// 等待消息处理完成
+		s1.WaitMessage()
+		s2.WaitMessage()
+
+		// 记录结果
+		t.Logf("阻塞场景 - 成功发布消息数: %d", publishCount)
+	}()
+
+	// 第二个协程：正常发布和订阅
+	go func() {
+		time.Sleep(time.Second)
+		defer close(done2)
+
+		const topic = "test-topic-normal"
+
+		// 创建发布者和订阅者
+		p := NewPublisher[string]()
+		s := NewSubscriber[string](topic, "normal-consumer")
+
+		// 计数器
+		var count int32
+		var wg sync.WaitGroup
+		wg.Add(100) // 期望处理100条消息
+
+		// 正常订阅者
+		s.AddConcurrentHandlers(SubscriberHandlerFunc[string](func(message *EventMessage[string]) error {
+			atomic.AddInt32(&count, 1)
+			wg.Done()
+			return nil
+		}), 1)
+
+		// 发布100条消息
+		for i := 0; i < 100; i++ {
+			msg := fmt.Sprintf("normal-message-%d", i)
+			err := p.Publish(topic, msg)
+			if err != nil {
+				t.Logf("正常场景 - 发布消息失败: %v", err)
+			}
+		}
+
+		// 等待所有消息处理完成
+		wg.Wait()
+		s.WaitMessage()
+
+		// 记录结果
+		t.Logf("正常场景 - 订阅者处理消息数: %d", atomic.LoadInt32(&count))
+	}()
+
+	// 等待两个协程完成
+	<-done2
+	select {
+	case <-done1:
+	case <-time.After(time.Second * 5):
+		fmt.Println("协程1按预料超时")
+	}
+
+	// 验证两个场景是否互相影响
+	t.Log("两个协程都已完成，测试结束")
+}

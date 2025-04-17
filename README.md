@@ -63,7 +63,7 @@ func main() {
 	const topic = "a-book"
 	p := NewPublisher[string]()
 	// Limit task failure retry attempts to 10 times
-	c := NewSubscriber(topic, "comsumer1", WithMaxAttempts[string](10))
+	c := NewSubscriber(topic, "comsumer1", WithMaxAttempts(10))
 	c.AddConcurrentHandlers(&Reader1{}, 5)
 
 	for i := 0; i < 5; i++ {
@@ -140,14 +140,12 @@ func main() {
 
 	const topic = "a-book"
 	p := NewProducer[string]()
-	// 限制任务失败重试次数 10 次
-	c := NewConsumer(topic, "comsumer1")
+	// Limit task failure retry attempts to 10 times
+	c := NewConsumer(topic, "comsumer1", WithMaxAttempts(10))
 	c.AddConcurrentHandlers(&Reader1{}, 5)
 	for i := 0; i < 5; i++ {
-		// 此函数会返回 err，正常使用发布订阅不会出错，可以直接丢弃 err 不处理
 		p.Publish(topic, fmt.Sprintf("a >> hello %d", i))
 	}
-
 	time.Sleep(2 * time.Second)
 }
 ```
@@ -232,3 +230,17 @@ For unlimited retries, use `WithMaxAttempts(0)`. By default, it retries 10 times
 
 **If `WithMaxAttempts(10)` means 10 retries, how many times will the callback be executed if it keeps failing?**
 - 10 times
+
+**How long will transactional messages be stored in the database?**
+- Automatically deletes **all** messages older than 15 days
+- Automatically deletes **completed** messages older than 7 days
+- When table data exceeds 10,000 rows, automatically deletes **completed** messages older than 3 days
+
+Need to customize these times? Please submit a PR or issue.
+
+**In the event bus, will continuous callback failures block the queue?**
+- No, failed tasks will enter a priority queue for delayed processing
+- Large numbers of failed tasks will cause messages to accumulate in memory, and will be released when reaching maximum retry attempts
+
+**In the event bus, if publishing to one topic is blocked, will it affect publishing to other topics?**
+- No, topics are independent of each other
