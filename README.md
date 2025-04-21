@@ -135,8 +135,8 @@ func (r *Reader1) HandleMessage(message *EventMessage[string]) error {
 
 // Simulate an author writing books frantically, with 5 editors processing one book per second
 func main() {
-	// 1. SetGorm
-	nsqite.SetGorm(db)
+	// 1. SetDB
+	nsqite.SetDB(db)
 
 	const topic = "a-book"
 	p := NewProducer[string]()
@@ -244,10 +244,3 @@ Need to customize these times? Please submit a PR or issue.
 
 **In the event bus, if publishing to one topic is blocked, will it affect publishing to other topics?**
 - No, topics are independent of each other
-
-**Why does NSQite depend on GORM?**
-- GORM provides automatic table creation and schema migration capabilities
-- It's the best solution for compatibility with both PostgreSQL and SQLite
-- Removing GORM would require users to implement the interface themselves, making it less user-friendly out of the box
-
-If you're interested in reducing NSQite's dependencies, feel free to submit a PR or issue.

@@ -136,12 +136,21 @@ func (n *NSQite) consumer(topic string) *consumerMap {
 	n.m.RLock()
 	consumers, ok := n.consumers[topic]
 	n.m.RUnlock()
-	if !ok {
-		consumers = &consumerMap{
-			data: make(map[string]*Consumer),
-		}
-		n.consumers[topic] = consumers
+	if ok {
+		return consumers
 	}
+
+	n.m.Lock()
+	defer n.m.Unlock()
+	consumers, ok = n.consumers[topic]
+	if ok {
+		return consumers
+	}
+
+	consumers = &consumerMap{
+		data: make(map[string]*Consumer),
+	}
+	n.consumers[topic] = consumers
 	return consumers
 }
 

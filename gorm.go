@@ -9,13 +9,13 @@ import "gorm.io/gorm"
 
 var db *gorm.DB
 
-func SetGorm(g *gorm.DB) {
+func SetDB(g *gorm.DB) {
 	db = g
 }
 
 func gormDB() *gorm.DB {
 	if db == nil {
-		panic("please use nsqite.SetGorm() to set db")
+		panic("please use nsqite.SetDB() to set db")
 	}
 	return db
 }

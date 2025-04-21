@@ -35,7 +35,7 @@ func initDB() {
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
 
-	SetGorm(gormDB)
+	SetDB(gormDB)
 }
 
 // TestNSQite 测试消费消息
