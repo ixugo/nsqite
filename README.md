@@ -24,6 +24,8 @@ Note: NSQite guarantees at-least-once message delivery, which means duplicate me
 
 ## Quick Start
 
+![](./docs/2.webp)
+
 ### Event Bus
 
 Suitable for business scenarios in monolithic architectures, implemented in memory, supporting 1:N publisher-subscriber relationships, including task failure delay retry mechanism.
