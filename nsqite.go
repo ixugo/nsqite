@@ -2,15 +2,13 @@ package nsqite
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"slices"
 	"strings"
 	"sync"
 	"time"
-
-	"gorm.io/gorm"
-	"gorm.io/gorm/clause"
 )
 
 // DefaultMaxRetentionDays 定义消息的默认最大保留天数为7天
@@ -22,12 +20,14 @@ const DefaultMaxRetentionDays = 7
 const DefaultMaxMessageRows = 10000
 
 var transactionMQ *NSQite
-
-var once sync.Once
+var (
+	once          sync.Once
+	ErrNoConsumer = errors.New("need consumers")
+)
 
 func TransactionMQ() *NSQite {
 	once.Do(func() {
-		transactionMQ = newNSQite(gormDB())
+		transactionMQ = newNSQite(getDB())
 	})
 	return transactionMQ
 }
@@ -37,7 +37,7 @@ type NSQite struct {
 	consumers map[string]*consumerMap
 	m         sync.RWMutex
 
-	db   *gorm.DB
+	db   *DB
 	exit chan struct{}
 	once sync.Once
 }
@@ -108,16 +108,11 @@ func (c *consumerMap) pumpPub(chs []string, msg Message) {
 }
 
 // newNSQite 创建一个新的NSQite实例
-func newNSQite(db *gorm.DB) *NSQite {
+func newNSQite(db *DB) *NSQite {
 	nsqite := &NSQite{
 		db:        db,
 		exit:      make(chan struct{}),
 		consumers: make(map[string]*consumerMap),
-	}
-	if err := nsqite.db.AutoMigrate(
-		&Message{},
-	); err != nil {
-		panic(err)
 	}
 	// 启动消息泵
 	go nsqite.messagePump()
@@ -154,13 +149,13 @@ func (n *NSQite) consumer(topic string) *consumerMap {
 	return consumers
 }
 
-func (n *NSQite) PublishTx(tx *gorm.DB, topic string, msg *Message) error {
+func (n *NSQite) PublishTx(tx SessionFunc, topic string, msg *Message) error {
 	c := n.consumer(topic)
 	msg.Channels, msg.Consumers = c.Channels()
-	if err := tx.Create(msg).Error; err != nil {
-		return err
+	if msg.Channels == " " {
+		return fmt.Errorf("topic %s %w", topic, ErrNoConsumer)
 	}
-	return nil
+	return tx(msg)
 }
 
 // Publish 发布消息到Topic
@@ -169,10 +164,10 @@ func (n *NSQite) Publish(topic string, msg *Message) error {
 	consumers, ok := n.consumers[topic]
 	n.m.RUnlock()
 	if !ok {
-		return fmt.Errorf("topic %s need consumers", topic)
+		return fmt.Errorf("topic %s %w", topic, ErrNoConsumer)
 	}
 
-	if err := n.PublishTx(n.db, topic, msg); err != nil {
+	if err := n.PublishTx(n.db.Create, topic, msg); err != nil {
 		return err
 	}
 
@@ -210,7 +205,6 @@ func (n *NSQite) messagePump() {
 	defer cleanUpTimer.Stop()
 
 	var id int
-	var msg Message
 	var count int64
 	msgs := make([]Message, 0, 24)
 	for {
@@ -219,13 +213,12 @@ func (n *NSQite) messagePump() {
 			return
 		case <-cleanUpTimer.C:
 			cleanUpTimer.Reset(GetTimeUntilMidnight())
-			now := time.Now()
 
-			if err := n.db.Table(msg.TableName()).Where("timestamp < ?", now.AddDate(0, 0, -15)).Delete(nil).Error; err != nil {
+			if err := n.db.DeleteOldMessages(-15); err != nil {
 				slog.Error("messagePump", "error", err)
 			}
 
-			if err := n.db.Table(msg.TableName()).Where("responded >= consumers").Count(&count).Error; err != nil {
+			if err := n.db.DeleteCompletedMessagesOlderThan(0); err != nil {
 				slog.Error("messagePump", "error", err)
 				continue
 			}
@@ -233,14 +226,14 @@ func (n *NSQite) messagePump() {
 			if count > DefaultMaxMessageRows {
 				days = 3
 			}
-			if err := n.db.Table(msg.TableName()).Where("responded >= consumers AND timestamp < ?", now.AddDate(0, 0, -days)).Delete(nil).Error; err != nil {
+			if err := n.db.DeleteCompletedMessagesOlderThan(-days); err != nil {
 				slog.Error("messagePump", "error", err)
 				continue
 			}
 		case <-timer.C:
 			timer.Reset(10 * time.Second)
 			msgs = msgs[:0]
-			if err := n.db.Table(msg.TableName()).Order("id ASC").Where("id > ? AND responded<consumers", id).Find(&msgs).Error; err != nil {
+			if err := n.db.FetchPendingMessages(id, &msgs); err != nil {
 				slog.Error("messagePump", "error", err)
 				continue
 			}
@@ -260,26 +253,44 @@ func (n *NSQite) messagePump() {
 }
 
 func (n *NSQite) Finish(msg *Message, channel string) error {
-	return n.db.Transaction(func(tx *gorm.DB) error {
-		if err := tx.Table(msg.TableName()).Clauses(clause.Locking{Strength: "UPDATE"}).First(msg).Error; err != nil {
-			return err
+	tx, err := n.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err != nil {
+			_ = tx.Rollback()
+		} else {
+			_ = tx.Commit()
 		}
+	}()
 
-		channels := make([]string, 0, 8)
+	// 根据数据库类型构建查询语句
+	query := "SELECT responded_channels, responded FROM nsqite_messages WHERE id = ?"
+	if n.db.DriverName() != "sqlite" {
+		query += " FOR UPDATE"
+	}
 
-		chs := strings.Split(msg.RespondedChannels, ",")
-		for _, ch := range chs {
-			if ch == channel {
-				return nil
-			}
-			if ch != "" {
-				channels = append(channels, ch)
-			}
+	row := tx.QueryRow(query, msg.ID)
+	if err := row.Scan(&msg.RespondedChannels, &msg.Responded); err != nil {
+		return err
+	}
+
+	channels := make([]string, 0, 8)
+	chs := strings.Split(msg.RespondedChannels, ",")
+	for _, ch := range chs {
+		if ch == channel {
+			return nil
 		}
-		msg.RespondedChannels = strings.Join(append(channels, channel), ",")
-		msg.Responded++
-		return tx.Table(msg.TableName()).Where("id=?", msg.ID).Select("responded_channels", "responded").Updates(msg).Error
-	})
+		if ch != "" {
+			channels = append(channels, ch)
+		}
+	}
+	msg.RespondedChannels = strings.Join(append(channels, channel), ",")
+	msg.Responded++
+
+	_, err = tx.Exec("UPDATE nsqite_messages SET responded_channels = ?, responded = ?, attempts = ? WHERE id = ?", msg.RespondedChannels, msg.Responded, msg.Attempts, msg.ID)
+	return err
 }
 
 func (n *NSQite) DelConsumer(topic, channel string) {

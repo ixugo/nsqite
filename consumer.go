@@ -76,16 +76,16 @@ func (c *Consumer) handlerLoop(handler MessageHandler) {
 	}()
 
 	var msg *Message
-	var ok bool
 	for {
 		select {
-		case msg, ok = <-c.incomingMessages:
-		case msg, ok = <-c.backendMessage:
-		case <-c.exit:
-			return
-		}
-		if !ok {
-			return
+		case msg = <-c.incomingMessages:
+			if msg == nil {
+				return
+			}
+		case msg = <-c.backendMessage:
+			if msg == nil {
+				continue
+			}
 		}
 
 		atomic.AddUint32(&msg.Attempts, 1)
@@ -125,7 +125,13 @@ func (c *Consumer) shouldFailMessage(msg *Message) bool {
 
 func (c *Consumer) backendLoop() {
 	timer := time.NewTimer(100 * time.Millisecond)
-	defer timer.Stop()
+	defer func() {
+		timer.Stop()
+		close(c.backendMessage)
+		c.deferredMutex.Lock()
+		c.deferredPQ = c.deferredPQ[:0]
+		c.deferredMutex.Unlock()
+	}()
 
 	for {
 		select {
@@ -227,18 +233,27 @@ func (c *Consumer) addToDeferredPQ(item *pqueue.Item) {
 }
 
 // WaitMessage 等待所有消息处理完成，方便测试消息处理进度，不建议在生产环境中使用
-func (c *Consumer) WaitMessage() {
-	for {
-		time.Sleep(100 * time.Millisecond)
-		c.deferredMutex.Lock()
-		l := c.deferredPQ.Len()
-		c.deferredMutex.Unlock()
-		if l == 0 && len(c.incomingMessages) == 0 && atomic.LoadInt32(&c.pendingMessages) == 0 {
-			return
+func (c *Consumer) WaitMessage() <-chan struct{} {
+	done := make(chan struct{})
+	go func() {
+		for {
+			time.Sleep(100 * time.Millisecond)
+			c.deferredMutex.Lock()
+			l := c.deferredPQ.Len()
+			c.deferredMutex.Unlock()
+			if l == 0 && len(c.incomingMessages) == 0 && atomic.LoadInt32(&c.pendingMessages) == 0 {
+				close(done)
+				return
+			}
 		}
-	}
+	}()
+	return done
 }
 
+// Stop the consumers will not receive messages again
+// 1. Stop receiving new messages
+// 2. Clear the deferred retry queue data
+// 3. Gradually stop the goroutines started by the current consumer
 func (c *Consumer) Stop() {
 	TransactionMQ().DelConsumer(c.topic, c.channel)
 	c.stopHandler.Do(func() {

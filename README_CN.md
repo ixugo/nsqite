@@ -60,15 +60,17 @@ func (r *Reader1) HandleMessage(message *EventMessage[string]) error {
 // 模拟一个作者疯狂写书，出版社派出 5 个编辑，每个编辑每秒只能处理一本书
 func main() {
 	// 1. SetDB
-	nsqite.SetDB(db)
+	if err := nsqite.SetDB(nsqite.DriverNameSQLite  db).AutoMigrate();err!=nil{
+		panic(err)
+	}
 
 	const topic = "a-book"
-	p := NewProducer[string]()
+	p := NewProducer()
 	// 限制任务失败重试次数 10 次
 	c := NewConsumer(topic, "comsumer1", WithMaxAttempts(10))
 	c.AddConcurrentHandlers(&Reader1{}, 5)
 	for i := 0; i < 5; i++ {
-		p.Publish(topic, fmt.Sprintf("a >> hello %d", i))
+		p.Publish(topic, fmt.Appendf("a >> hello %d", i))
 	}
 	time.Sleep(2 * time.Second)
 }
@@ -101,7 +103,7 @@ func (r *Reader3) HandleMessage(message *EventMessage[string]) error {
 
 ### 事务消息
 
-基于数据库实现，支持 GORM，支持事务发布消息，由生产者与消费者组成。
+基于数据库实现，支持 GORM/pgx ...，支持事务发布消息，由生产者与消费者组成。
 
 适用场景：
 + 单体架构或分布式架构
@@ -134,8 +136,10 @@ func (r *Reader1) HandleMessage(message *EventMessage[string]) error {
 
 // 模拟一个作者疯狂写书，出版社派出 5 个编辑，每个编辑每秒只能处理一本书
 func main() {
-	// 1. SetDB
-	nsqite.SetDB(db)
+	// 1. SetDB and create table
+	if err := nsqite.SetDB(nsqite.DriverNameSQLite  db).AutoMigrate();err!=nil{
+		panic(err)
+	}
 
 	const topic = "a-book"
 	p := NewProducer[string]()
@@ -197,7 +201,7 @@ NSQite 使用 slog 记录日志，如果出现以下警告日志，需要及时�
 - a,c 因为已完成，不会收到消息
 
 **任务执行失败，可以自定义延迟执行时间吗?**
-- 可以，看[案例](./example/bus_delay/main.go)
+- 可以，看[案例](https://github.com/ixugo/nsqite_example/example/bus_delay/main.go)
 
 **如果任务一直失败，达到最大超时次数会怎样?**
 任务结束有 2 个判定标准

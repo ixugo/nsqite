@@ -9,33 +9,29 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
-
-	"github.com/glebarez/sqlite"
-	"gorm.io/gorm"
-	"gorm.io/gorm/logger"
 )
 
+// test move to github.com/ixugo/nsqite_example
+// test move to github.com/ixugo/nsqite_example
+// test move to github.com/ixugo/nsqite_example
+
+// _ "github.com/glebarez/go-sqlite"
 func initDB() {
-	// slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
-	// 	Level:     slog.LevelDebug,
-	// 	AddSource: true,
-	// })))
+	// 	// slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
+	// 	// 	Level:     slog.LevelDebug,
+	// 	// 	AddSource: true,
+	// 	// })))
 
-	// 使用内存数据库
-	gormDB, err := gorm.Open(sqlite.Open("test.db"), &gorm.Config{
-		Logger: logger.Default.LogMode(logger.Silent),
-	})
-	if err != nil {
-		panic(err)
-	}
-	db, err := gormDB.DB()
-	if err != nil {
-		panic(err)
-	}
-	db.SetMaxOpenConns(1)
-	db.SetMaxIdleConns(1)
+	// 	db, err := sql.Open("sqlite", "test.db")
+	// 	if err != nil {
+	// 		panic(err)
+	// 	}
+	// 	db.SetMaxOpenConns(1)
+	// 	db.SetMaxIdleConns(1)
 
-	SetDB(gormDB)
+	//	if err := SetDB(DriverNameSQLite, db).AutoMigrate(); err != nil {
+	//		panic(err)
+	//	}
 }
 
 // TestNSQite 测试消费消息

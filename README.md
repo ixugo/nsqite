@@ -101,7 +101,7 @@ func (r *Reader3) HandleMessage(message *EventMessage[string]) error {
 
 ### Transactional Messages
 
-Database-based implementation, supporting GORM, with transactional message publishing, consisting of producers and consumers.
+Database-based implementation, supporting GORM/PGX..., with transactional message publishing, consisting of producers and consumers.
 
 Use cases:
 + Monolithic or distributed architecture
@@ -136,41 +136,19 @@ func (r *Reader1) HandleMessage(message *EventMessage[string]) error {
 // Simulate an author writing books frantically, with 5 editors processing one book per second
 func main() {
 	// 1. SetDB
-	nsqite.SetDB(db)
+	if err := nsqite.SetDB(nsqite.DriverNameSQLite  db).AutoMigrate();err!=nil{
+		panic(err)
+	}
 
 	const topic = "a-book"
-	p := NewProducer[string]()
-	// Limit task failure retry attempts to 10 times
+	p := NewProducer()
+	// 限制任务失败重试次数 10 次
 	c := NewConsumer(topic, "comsumer1", WithMaxAttempts(10))
 	c.AddConcurrentHandlers(&Reader1{}, 5)
 	for i := 0; i < 5; i++ {
-		p.Publish(topic, fmt.Sprintf("a >> hello %d", i))
+		p.Publish(topic, fmt.Appendf("a >> hello %d", i))
 	}
 	time.Sleep(2 * time.Second)
-}
-```
-
-#### Manual Message Control
-```go
-type Reader3 struct {
-	receivedMessages sync.Map
-	attemptCount     int32
-}
-
-// HandleMessage implements Handler.
-func (r *Reader3) HandleMessage(message *EventMessage[string]) error {
-	// Disable auto-completion
-	message.DisableAutoResponse()
-	if message.Body == "hello" || message.Attempts > 3 {
-		// Manual completion
-		r.receivedMessages.Store(message.Body, true)
-		message.Finish()
-		return nil
-	}
-	// Manual retry after 1 second delay
-	atomic.AddInt32(&r.attemptCount, 1)
-	message.Requeue(time.Second)
-	return nil
 }
 ```
 
@@ -220,7 +198,7 @@ Solutions:
 - a and c won't receive the message again as they have already completed
 
 **Can I customize the delay time when a task fails?**
-- Yes, see the [example](./example/bus_delay/main.go)
+- Yes, see the [example]([./example/bus_delay/main.go](https://github.com/ixugo/nsqite_example/example/bus_delay/main.go))
 
 **What happens when a task keeps failing and reaches the maximum retry count?**
 A task ends under two conditions:

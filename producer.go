@@ -2,8 +2,6 @@ package nsqite
 
 import (
 	"time"
-
-	"gorm.io/gorm"
 )
 
 // Producer 表示一个消息生产者
@@ -24,9 +22,17 @@ func (p *Producer) Publish(topic string, body []byte) error {
 	})
 }
 
-// PublishTx 发布事务消息
-func (p *Producer) PublishTx(tx *gorm.DB, topic string, body []byte) error {
-	return TransactionMQ().PublishTx(tx, topic, &Message{
+type SessionFunc func(*Message) error
+
+// PublishTx publish database transaction messages
+// createFn insert into function
+// gorm example:
+// PublishTx(func(v *nsqite.Message) error {
+// 	return db.Create(v).Error
+// }, "topic", []byte("body"))
+
+func (p *Producer) PublishTx(createFn SessionFunc, topic string, body []byte) error {
+	return TransactionMQ().PublishTx(createFn, topic, &Message{
 		Body:      body,
 		Timestamp: time.Now(),
 		Topic:     topic,

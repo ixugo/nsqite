@@ -8,24 +8,20 @@ import (
 // Message 表示一条消息
 type Message struct {
 	ID        int       `gorm:"primaryKey" json:"id"`
-	Timestamp time.Time `gorm:"column:timestamp;notNull;default:CURRENT_TIMESTAMP;comment:创建时间" json:"timestamp"` // 创建时间
-
-	Topic string `gorm:"notNull;index;default:''" json:"topic"` // 消息所属的 topic
-	Body  []byte `gorm:"notNull" json:"body"`                   // 消息内容
-
+	Timestamp time.Time `gorm:"column:timestamp;notNull;default:CURRENT_TIMESTAMP;index;comment:创建时间" json:"timestamp"` // 创建时间
+	Topic     string    `gorm:"notNull;index;default:''" json:"topic"`                                                  // 消息所属的 topic
+	Body      []byte    `gorm:"notNull" json:"body"`                                                                    // 消息内容
 	// 订阅数和完成数
 	Consumers         uint32 `gorm:"notNull;default:0;index:idx_messages_consumers_responded" json:"consumers"` // 消息订阅数
 	Responded         uint32 `gorm:"notNull;default:0;index:idx_messages_consumers_responded" json:"responded"` // 消息响应完成数
 	Channels          string `gorm:"notNull;default:''" json:"channels"`                                        // 消息订阅通道
 	RespondedChannels string `gorm:"notNull;default:''" json:"responded_channels"`                              // 消息响应完成通道
+	Attempts          uint32 `gorm:"notNull;default:0" json:"attempts"`                                         // 消息重试次数
 
 	responded int32 // 是否已得到处理
-
 	// runtime
 	Delegate             MessageDelegate `gorm:"-" json:"-"`
 	autoResponseDisabled int32           // 是否禁止自动完成，1表示禁用，0表示启用
-
-	Attempts uint32 `gorm:"notNull;default:0" json:"attempts"` // 消息重试次数
 }
 
 func (*Message) TableName() string {
