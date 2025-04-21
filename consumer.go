@@ -240,7 +240,7 @@ func (c *Consumer) WaitMessage() {
 }
 
 func (c *Consumer) Stop() {
-	TransactionMQ().DelConsumer(c)
+	TransactionMQ().DelConsumer(c.topic, c.channel)
 	c.stopHandler.Do(func() {
 		close(c.exit)
 		close(c.incomingMessages)

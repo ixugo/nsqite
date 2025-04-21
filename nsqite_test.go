@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log/slog"
 	"runtime"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -151,4 +152,28 @@ func BenchmarkNSQite(b *testing.B) {
 
 	// 输出统计信息
 	b.ReportMetric(float64(b.N)/b.Elapsed().Seconds(), "msgs/sec")
+}
+
+func TestNSQiteClose(t *testing.T) {
+	initDB()
+	var wg sync.WaitGroup
+	for i := range 10000 {
+		topic := "test-topic-close" + strconv.Itoa(i)
+		p := NewProducer()
+		s1 := NewConsumer(topic, "limit-consumer-1", WithQueueSize(2))
+		s1.AddConcurrentHandlers(ConsumerHandlerFunc(func(msg *Message) error { return nil }), 1)
+
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			for range 3 {
+				p.Publish(topic, []byte("msg"))
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			s1.Stop()
+		}()
+	}
+	time.Sleep(time.Second)
 }

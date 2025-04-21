@@ -1,6 +1,7 @@
 package nsqite
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"slices"
@@ -33,7 +34,7 @@ func TransactionMQ() *NSQite {
 
 // NSQite 是消息队列的核心结构
 type NSQite struct {
-	consumers map[string]map[string]*Consumer
+	consumers map[string]*consumerMap
 	m         sync.RWMutex
 
 	db   *gorm.DB
@@ -41,12 +42,77 @@ type NSQite struct {
 	once sync.Once
 }
 
+type consumerMap struct {
+	m    sync.RWMutex
+	data map[string]*Consumer
+}
+
+func (c *consumerMap) add(channel string, consumer *Consumer) {
+	c.m.Lock()
+	defer c.m.Unlock()
+	c.data[channel] = consumer
+}
+
+func (c *consumerMap) del(channel string) {
+	c.m.Lock()
+	defer c.m.Unlock()
+	delete(c.data, channel)
+}
+
+func (c *consumerMap) Len() int {
+	c.m.RLock()
+	defer c.m.RUnlock()
+	return len(c.data)
+}
+
+func (c *consumerMap) Channels() (string, uint32) {
+	c.m.RLock()
+	defer c.m.RUnlock()
+	chs := make([]string, 0, 8)
+	for ch := range c.data {
+		chs = append(chs, ch)
+	}
+	return strings.Join(chs, ","), uint32(len(chs))
+}
+
+func (c *consumerMap) pub(ctx context.Context, msg *Message) error {
+	c.m.RLock()
+	defer c.m.RUnlock()
+
+	var i int
+	for _, c := range c.data {
+		i++
+		m := msg
+		if i > 1 {
+			mm := *msg
+			m = &mm
+		}
+		if err := c.SendMessage(m); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (c *consumerMap) pumpPub(chs []string, msg Message) {
+	c.m.RLock()
+	defer c.m.RUnlock()
+
+	for _, c := range c.data {
+		if !slices.Contains(chs, c.channel) {
+			// TODO: 若发送阻塞，会导致整个消息泵阻塞
+			// 可以增加延迟队列，将发送失败的消息，放到延迟队列里重试，优先处理未阻塞的消费者
+			_ = c.sendMessage(msg)
+		}
+	}
+}
+
 // newNSQite 创建一个新的NSQite实例
 func newNSQite(db *gorm.DB) *NSQite {
 	nsqite := &NSQite{
 		db:        db,
 		exit:      make(chan struct{}),
-		consumers: make(map[string]map[string]*Consumer),
+		consumers: make(map[string]*consumerMap),
 	}
 	if err := nsqite.db.AutoMigrate(
 		&Message{},
@@ -66,12 +132,14 @@ func (n *NSQite) Close() error {
 	return nil
 }
 
-func (n *NSQite) consumer(topic string) map[string]*Consumer {
+func (n *NSQite) consumer(topic string) *consumerMap {
 	n.m.RLock()
 	consumers, ok := n.consumers[topic]
 	n.m.RUnlock()
 	if !ok {
-		consumers = make(map[string]*Consumer)
+		consumers = &consumerMap{
+			data: make(map[string]*Consumer),
+		}
 		n.consumers[topic] = consumers
 	}
 	return consumers
@@ -79,12 +147,7 @@ func (n *NSQite) consumer(topic string) map[string]*Consumer {
 
 func (n *NSQite) PublishTx(tx *gorm.DB, topic string, msg *Message) error {
 	c := n.consumer(topic)
-	chs := make([]string, 0, 8)
-	for _, consumer := range c {
-		chs = append(chs, consumer.channel)
-	}
-	msg.Consumers = uint32(len(chs)) //nolint
-	msg.Channels = strings.Join(chs, ",")
+	msg.Channels, msg.Consumers = c.Channels()
 	if err := tx.Create(msg).Error; err != nil {
 		return err
 	}
@@ -104,20 +167,7 @@ func (n *NSQite) Publish(topic string, msg *Message) error {
 		return err
 	}
 
-	var i int
-	for _, c := range consumers {
-		i++
-		m := msg
-		if i > 1 {
-			mm := *msg
-			m = &mm
-		}
-
-		if err := c.SendMessage(m); err != nil {
-			return err
-		}
-	}
-	return nil
+	return consumers.pub(context.Background(), msg)
 }
 
 func (n *NSQite) AddConsumer(c *Consumer) {
@@ -126,10 +176,12 @@ func (n *NSQite) AddConsumer(c *Consumer) {
 
 	consumer, ok := n.consumers[c.topic]
 	if !ok {
-		consumer = make(map[string]*Consumer)
+		consumer = &consumerMap{
+			data: make(map[string]*Consumer),
+		}
 		n.consumers[c.topic] = consumer
 	}
-	consumer[c.channel] = c
+	consumer.add(c.channel, c)
 }
 
 // GetTimeUntilMidnight 返回距离下一个凌晨12点的时间间隔
@@ -191,13 +243,7 @@ func (n *NSQite) messagePump() {
 				consumers := n.consumer(msg.Topic)
 				chs := strings.Split(msg.RespondedChannels, ",")
 
-				for _, c := range consumers {
-					if !slices.Contains(chs, c.channel) {
-						// TODO: 若发送阻塞，会导致整个消息泵阻塞
-						// 可以增加延迟队列，将发送失败的消息，放到延迟队列里重试，优先处理未阻塞的消费者
-						_ = c.sendMessage(msg)
-					}
-				}
+				consumers.pumpPub(chs, msg)
 			}
 			timer.Reset(3 * time.Second)
 		}
@@ -227,8 +273,16 @@ func (n *NSQite) Finish(msg *Message, channel string) error {
 	})
 }
 
-func (n *NSQite) DelConsumer(c *Consumer) {
+func (n *NSQite) DelConsumer(topic, channel string) {
 	n.m.Lock()
 	defer n.m.Unlock()
-	delete(n.consumers[c.topic], c.channel)
+
+	chs, ok := n.consumers[topic]
+	if !ok {
+		return
+	}
+	chs.del(channel)
+	if chs.Len() == 0 {
+		delete(n.consumers, topic)
+	}
 }

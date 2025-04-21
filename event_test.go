@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -476,4 +477,29 @@ func TestConcurrentPublishSubscribe2(t *testing.T) {
 
 	// 验证两个场景是否互相影响
 	t.Log("两个协程都已完成，测试结束")
+}
+
+func TestEventMessageClose(t *testing.T) {
+	var wg sync.WaitGroup
+	for i := range 100000 {
+		topic := "test-topic-close" + strconv.Itoa(i)
+		p := NewPublisher[string]()
+		s1 := NewSubscriber[string](topic, "limit-consumer-1", WithQueueSize(2))
+		s1.AddConcurrentHandlers(SubscriberHandlerFunc[string](func(message *EventMessage[string]) error {
+			return nil
+		}), 1)
+
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			for range 10 {
+				p.Publish(topic, "msg")
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			s1.Stop()
+		}()
+	}
+	time.Sleep(time.Second)
 }

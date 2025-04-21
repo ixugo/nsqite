@@ -20,51 +20,38 @@ type cloner interface {
 var eventBus = newEventBus()
 
 type EventBus struct {
-	subscribers map[string]map[string]SubscriberInfo
+	subscribers map[string]*subscriberMap
 	m           sync.RWMutex
 }
-
-func newEventBus() *EventBus {
-	return &EventBus{
-		subscribers: make(map[string]map[string]SubscriberInfo),
-	}
+type subscriberMap struct {
+	m    sync.RWMutex
+	data map[string]SubscriberInfo
 }
 
-func (s *EventBus) AddSubscriber(c SubscriberInfo) {
+func (s *subscriberMap) add(channel string, c SubscriberInfo) {
 	s.m.Lock()
 	defer s.m.Unlock()
-
-	topic := c.GetTopic()
-	channel := c.GetChannel()
-
-	chs := s.subscribers[topic]
-	if chs == nil {
-		chs = make(map[string]SubscriberInfo)
-		s.subscribers[topic] = chs
-	}
-	chs[channel] = c
+	s.data[channel] = c
 }
 
-func (s *EventBus) DelConsumer(c SubscriberInfo) {
+func (s *subscriberMap) del(channel string) {
 	s.m.Lock()
 	defer s.m.Unlock()
-
-	topic := c.GetTopic()
-	channel := c.GetChannel()
-
-	delete(s.subscribers[topic], channel)
+	delete(s.data, channel)
 }
 
-func (s *EventBus) Publish(ctx context.Context, topic string, msg cloner) error {
+func (s *subscriberMap) Len() int {
 	s.m.RLock()
-	subs, ok := s.subscribers[topic]
-	s.m.RUnlock()
-	if !ok {
-		return fmt.Errorf("topic %s need subscribers", topic)
-	}
+	defer s.m.RUnlock()
+	return len(s.data)
+}
+
+func (s *subscriberMap) pub(ctx context.Context, msg cloner) error {
+	s.m.RLock()
+	defer s.m.RUnlock()
 
 	var i int
-	for _, c := range subs {
+	for _, c := range s.data {
 		i++
 		m := msg
 		if i > 1 {
@@ -75,4 +62,57 @@ func (s *EventBus) Publish(ctx context.Context, topic string, msg cloner) error 
 		}
 	}
 	return nil
+}
+
+func newEventBus() *EventBus {
+	return &EventBus{
+		subscribers: make(map[string]*subscriberMap),
+	}
+}
+
+func (s *EventBus) AddSubscriber(c SubscriberInfo) {
+	s.m.Lock()
+	defer s.m.Unlock()
+
+	topic := c.GetTopic()
+	channel := c.GetChannel()
+	chs, ok := s.subscribers[topic]
+	if !ok {
+		chs = &subscriberMap{
+			data: make(map[string]SubscriberInfo),
+		}
+		s.subscribers[topic] = chs
+	}
+	chs.add(channel, c)
+}
+
+func (s *EventBus) DelConsumer(c SubscriberInfo) {
+	s.m.Lock()
+	defer s.m.Unlock()
+
+	topic := c.GetTopic()
+	channel := c.GetChannel()
+
+	chs, ok := s.subscribers[topic]
+	if ok {
+		chs.del(channel)
+		if chs.Len() == 0 {
+			delete(s.subscribers, topic)
+		}
+	}
+}
+
+func (s *EventBus) GetConsumer(topic string) (*subscriberMap, bool) {
+	s.m.RLock()
+	defer s.m.RUnlock()
+	chs, ok := s.subscribers[topic]
+	return chs, ok
+}
+
+func (s *EventBus) Publish(ctx context.Context, topic string, msg cloner) error {
+	subs, ok := s.GetConsumer(topic)
+	if !ok {
+		return fmt.Errorf("topic %s need subscribers", topic)
+	}
+	return subs.pub(ctx, msg)
 }
