@@ -2,7 +2,6 @@ package nsqite
 
 import (
 	"database/sql"
-	"fmt"
 	"time"
 )
 
@@ -43,26 +42,17 @@ func SetPostgres(g *sql.DB) *DB {
 
 // AutoMigrate init database table
 // 1. create table nsqite_messages if not exists
+// 如果你使用 gorm，可使用 gorm.AutoMigrate(new(nsqite.Message)) 初始化
+// 如果你使用 goddd，可使用以下方式
+//
+// if orm.EnabledAutoMigrate {
+// if err := uc.DB.AutoMigrate(new(nsqite.Message)); err != nil {
+// panic(err)
+// }
+// }
 func (d *DB) AutoMigrate() error {
 	var query string
-	switch d.driverName {
-	case DriverNamePostgres:
-		query = `
-		CREATE TABLE IF NOT EXISTS nsqite_messages (
-			id SERIAL PRIMARY KEY,
-			timestamp TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-			topic TEXT NOT NULL DEFAULT '',
-			body BYTEA NOT NULL,
-			consumers INTEGER NOT NULL DEFAULT 0,
-			responded INTEGER NOT NULL DEFAULT 0,
-			channels TEXT NOT NULL DEFAULT '',
-			responded_channels TEXT NOT NULL DEFAULT '',
-			attempts INTEGER NOT NULL DEFAULT 0
-		);
-		CREATE INDEX IF NOT EXISTS idx_messages_consumers_responded ON nsqite_messages (consumers, responded);
-		CREATE INDEX IF NOT EXISTS idx_messages_timestamp ON nsqite_messages (timestamp);
-		`
-	case DriverNameSQLite:
+	if d.driverName == DriverNameSQLite {
 		query = `
 		CREATE TABLE IF NOT EXISTS nsqite_messages (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -78,8 +68,22 @@ func (d *DB) AutoMigrate() error {
 		CREATE INDEX IF NOT EXISTS idx_messages_consumers_responded ON nsqite_messages (consumers, responded);
 		CREATE INDEX IF NOT EXISTS idx_messages_timestamp ON nsqite_messages (timestamp);
 		`
-	default:
-		return fmt.Errorf("unsupported database type: %s", d.driverName)
+	} else {
+		query = `
+		CREATE TABLE IF NOT EXISTS nsqite_messages (
+			id SERIAL PRIMARY KEY,
+			timestamp TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			topic TEXT NOT NULL DEFAULT '',
+			body BYTEA NOT NULL,
+			consumers INTEGER NOT NULL DEFAULT 0,
+			responded INTEGER NOT NULL DEFAULT 0,
+			channels TEXT NOT NULL DEFAULT '',
+			responded_channels TEXT NOT NULL DEFAULT '',
+			attempts INTEGER NOT NULL DEFAULT 0
+		);
+		CREATE INDEX IF NOT EXISTS idx_messages_consumers_responded ON nsqite_messages (consumers, responded);
+		CREATE INDEX IF NOT EXISTS idx_messages_timestamp ON nsqite_messages (timestamp);
+		`
 	}
 	_, err := d.DB.Exec(query)
 	return err
