@@ -266,9 +266,11 @@ func (n *NSQite) Finish(msg *Message, channel string) error {
 	}()
 
 	// 根据数据库类型构建查询语句
-	query := "SELECT responded_channels, responded FROM nsqite_messages WHERE id = ?"
-	if n.db.DriverName() != "sqlite" {
-		query += " FOR UPDATE"
+	var query string
+	if n.db.DriverName() == DriverNamePostgres {
+		query = "SELECT responded_channels, responded FROM nsqite_messages WHERE id = $1 FOR UPDATE"
+	} else {
+		query = "SELECT responded_channels, responded FROM nsqite_messages WHERE id = ?"
 	}
 
 	row := tx.QueryRow(query, msg.ID)
@@ -289,7 +291,13 @@ func (n *NSQite) Finish(msg *Message, channel string) error {
 	msg.RespondedChannels = strings.Join(append(channels, channel), ",")
 	msg.Responded++
 
-	_, err = tx.Exec("UPDATE nsqite_messages SET responded_channels = ?, responded = ?, attempts = ? WHERE id = ?", msg.RespondedChannels, msg.Responded, msg.Attempts, msg.ID)
+	var updateQuery string
+	if n.db.DriverName() == DriverNamePostgres {
+		updateQuery = "UPDATE nsqite_messages SET responded_channels = $1, responded = $2, attempts = $3 WHERE id = $4"
+	} else {
+		updateQuery = "UPDATE nsqite_messages SET responded_channels = ?, responded = ?, attempts = ? WHERE id = ?"
+	}
+	_, err = tx.Exec(updateQuery, msg.RespondedChannels, msg.Responded, msg.Attempts, msg.ID)
 	return err
 }
 

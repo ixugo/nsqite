@@ -2,6 +2,7 @@ package nsqite
 
 import (
 	"database/sql"
+	"fmt"
 	"time"
 )
 
@@ -97,6 +98,22 @@ func getDB() *DB {
 }
 
 func (d *DB) Create(value *Message) error {
+	if d.driverName == DriverNamePostgres {
+		// PostgreSQL 不支持 LastInsertId，需要使用 RETURNING 子句
+		query := `INSERT INTO nsqite_messages (topic, body, channels, consumers, responded, responded_channels, timestamp)
+		          VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`
+		err := d.DB.QueryRow(query,
+			value.Topic,
+			value.Body,
+			value.Channels,
+			value.Consumers,
+			value.Responded,
+			value.RespondedChannels,
+			value.Timestamp,
+		).Scan(&value.ID)
+		return err
+	}
+
 	query := `INSERT INTO nsqite_messages (topic, body, channels, consumers, responded, responded_channels, timestamp)
 	          VALUES (?, ?, ?, ?, ?, ?, ?)`
 	result, err := d.DB.Exec(query,
@@ -120,14 +137,14 @@ func (d *DB) Create(value *Message) error {
 }
 
 func (d *DB) DeleteOldMessages(days int) error {
-	query := `DELETE FROM nsqite_messages WHERE timestamp < ?`
+	query := `DELETE FROM nsqite_messages WHERE timestamp < ` + d.placeholder(1)
 	thresholdDate := time.Now().AddDate(0, 0, days)
 	_, err := d.DB.Exec(query, thresholdDate)
 	return err
 }
 
 func (d *DB) DeleteCompletedMessagesOlderThan(days int) error {
-	query := `DELETE FROM nsqite_messages WHERE responded >= consumers AND timestamp < ?`
+	query := `DELETE FROM nsqite_messages WHERE responded >= consumers AND timestamp < ` + d.placeholder(1)
 	thresholdDate := time.Now().AddDate(0, 0, days)
 	_, err := d.DB.Exec(query, thresholdDate)
 	return err
@@ -136,7 +153,7 @@ func (d *DB) DeleteCompletedMessagesOlderThan(days int) error {
 func (d *DB) FetchPendingMessages(id int, msgs *[]Message) error {
 	query := `SELECT id, topic, body, channels, consumers, responded, responded_channels, timestamp, attempts
 	          FROM nsqite_messages
-	          WHERE id > ? AND responded < consumers
+	          WHERE id > ` + d.placeholder(1) + ` AND responded < consumers
 	          ORDER BY id ASC
 	          LIMIT 100`
 	rows, err := d.DB.Query(query, id)
@@ -156,6 +173,38 @@ func (d *DB) FetchPendingMessages(id int, msgs *[]Message) error {
 
 func (d *DB) DriverName() string {
 	return d.driverName
+}
+
+// placeholder 根据数据库驱动类型返回对应的占位符
+// SQLite 使用 ? 占位符，PostgreSQL 使用 $1, $2, $3... 位置参数
+func (d *DB) placeholder(index int) string {
+	if d.driverName == DriverNamePostgres {
+		return fmt.Sprintf("$%d", index)
+	}
+	return "?"
+}
+
+// placeholders 生成多个占位符，用逗号分隔
+// 用于 INSERT 语句的 VALUES 部分
+func (d *DB) placeholders(count int) string {
+	if count <= 0 {
+		return ""
+	}
+	if d.driverName == DriverNamePostgres {
+		result := ""
+		for i := 1; i <= count; i++ {
+			if i > 1 {
+				result += ", "
+			}
+			result += fmt.Sprintf("$%d", i)
+		}
+		return result
+	}
+	result := "?"
+	for i := 1; i < count; i++ {
+		result += ", ?"
+	}
+	return result
 }
 
 func (d *DB) Count() (int, error) {
